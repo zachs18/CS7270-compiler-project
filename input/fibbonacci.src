@@ -1,0 +1,11 @@
+extern fn fibonacci(n: u64) -> u64 {
+    let mut a: u64 = 0;
+    let mut b: u64 = 1;
+    let mut i: u64 = 0;
+    while i < n {
+        let c = a + b;
+        b = a;
+        a = c;
+    }
+    a
+}
