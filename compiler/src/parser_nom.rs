@@ -4,7 +4,7 @@ use either::Either;
 use itertools::{Itertools, Position};
 use nom::{
     branch::alt,
-    combinator::{cut, eof, map_opt, not, opt, verify},
+    combinator::{all_consuming, cut, eof, map_opt, not, opt, verify},
     error::{ErrorKind, ParseError},
     multi::{fold_many0, many0, separated_list1},
     sequence::{pair, preceded, terminated, tuple},
@@ -138,7 +138,7 @@ pub fn parse(tokens: &[TokenTree]) -> Vec<Item> {
 }
 
 fn parse_items_full(input: &[TokenTree]) -> IResult<'_, Vec<Item>> {
-    terminated(many0(parse_item), eof)(input)
+    all_consuming(many0(parse_item))(input)
 }
 
 fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
@@ -157,7 +157,7 @@ fn parse_group<
 >(
     expected_delimiter: Delimiter, inner: P,
 ) -> impl FnMut(&'a [TokenTree]) -> IResult<'a, O, E> {
-    let mut inner = terminated(inner, nom::combinator::eof);
+    let mut inner = all_consuming(inner);
     move |input: &'a [TokenTree]| -> IResult<'a, O, E> {
         let Some((TokenTree::Group(group), rest)) = input.split_first() else {
             return Err(nom::Err::Error(
@@ -317,7 +317,7 @@ fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
             condition: Box::new(condition),
             body,
         }),
-        tuple((parse_ident("for"), |input| todo!("for loop")))
+        tuple((parse_ident("for"), |_input| todo!("for loop")))
             .map(|(_, ())| todo!()),
         tuple((parse_ident("loop"), parse_block))
             .map(|(_, body)| Expression::Loop(body)),
@@ -382,7 +382,6 @@ fn test_atoms() {
     let tokens = lex("!&*&!*&a".as_bytes());
     let ast = parse_atom(&tokens);
     assert!(ast.is_ok());
-    dbg!(ast);
 }
 
 const fn sorted_by_length_decreasing<const N: usize>(
@@ -548,6 +547,8 @@ fn parse_extern_block(input: &[TokenTree]) -> IResult<'_, ExternBlock> {
 }
 
 fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
+    // TODO: remove once todo!() is implmented below;
+    // this way we don't panic if there's nothing to parse anyway
     let (input, _) = not(eof)(input)?;
     let mut basic = alt((
         parse_ident("_").map(|_| Pattern::Wildcard),
