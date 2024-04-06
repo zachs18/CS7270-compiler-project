@@ -7,4 +7,8 @@ edition = "2021"
 
 [dependencies]
 copy-range = "0.1.1"
+either = "1.10.0"
+itertools = "0.12.1"
+nom = "7.1.3"
 object = { version = "0.34.0", features = ["write"] }
+zachs18-stdx = "0.1.3"

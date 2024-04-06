@@ -1,0 +1,566 @@
+use std::{backtrace::Backtrace, fmt};
+
+use either::Either;
+use itertools::{Itertools, Position};
+use nom::{
+    branch::alt,
+    combinator::{cut, eof, map_opt, not, opt, verify},
+    error::{ErrorKind, ParseError},
+    multi::{fold_many0, many0, separated_list1},
+    sequence::{pair, preceded, terminated, tuple},
+    Finish, Parser,
+};
+use zachs18_stdx::OptionExt;
+
+use crate::{
+    ast::{
+        Block, Expression, ExternBlock, FnArg, FnItem, Item, Pattern,
+        Statement, StaticItem, Type,
+    },
+    lexer::{self, is_keyword},
+    token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
+};
+
+struct ParseError_<'a> {
+    backtrace: Backtrace,
+    expected: Option<&'static str>,
+    found: Option<&'a TokenTree>,
+    caused_by: Vec<Self>,
+}
+
+impl<'a> fmt::Debug for ParseError_<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <Self as fmt::Display>::fmt(self, f)
+    }
+}
+
+impl fmt::Display for ParseError_<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "at {}: ", self.backtrace)?;
+        if let Some(expected) = self.expected {
+            write!(f, "expected {expected}, ")?;
+        }
+        write!(f, "found ")?;
+        match self.found {
+            None => write!(f, "<eof>")?,
+            Some(TokenTree::Group(Group { delimiter, .. })) => {
+                write!(f, "`{}`", delimiter.opening())?
+            }
+            Some(TokenTree::Ident(Ident { ident, .. }))
+                if is_keyword(ident) =>
+            {
+                write!(f, "keyword `{ident}`")?
+            }
+            Some(TokenTree::Ident(Ident { ident, .. })) => {
+                write!(f, "identifier `{ident}`")?
+            }
+            Some(TokenTree::Integer(_)) => write!(f, "integer literal")?,
+            Some(&TokenTree::Punct(Punct { c, .. })) => {
+                write!(f, "`{}`", c as char)?
+            }
+        }
+        if let Some(found) = self.found {
+            write!(f, " at {:?}", found.span())?;
+        }
+        write!(f, " caused by: {:?}", self.caused_by)?;
+        Ok(())
+    }
+}
+
+impl<'a> ParseError<&'a [TokenTree]> for ParseError_<'a> {
+    fn from_error_kind(input: &'a [TokenTree], _kind: ErrorKind) -> Self {
+        Self {
+            expected: None,
+            found: input.first(),
+            backtrace: Backtrace::force_capture(),
+            caused_by: vec![],
+        }
+    }
+
+    fn append(
+        input: &'a [TokenTree], kind: ErrorKind, mut other: Self,
+    ) -> Self {
+        other.caused_by.push(Self::from_error_kind(input, kind));
+        other
+    }
+}
+
+pub fn separated_list<I, O, O2, E, F, G>(
+    sep: G, f: F,
+) -> impl FnMut(I) -> nom::IResult<I, Vec<O>, E>
+where
+    I: Clone + nom::InputLength,
+    F: Parser<I, O, E>,
+    G: Parser<I, O2, E> + Clone,
+    E: ParseError<I>,
+{
+    let mut inner = opt(terminated(separated_list1(sep.clone(), f), opt(sep)))
+        .map(Option::unwrap_or_default);
+    move |input| inner.parse(input)
+}
+
+fn either<I, O1, O2, E, P1, P2>(
+    p1: P1, p2: P2,
+) -> impl FnMut(I) -> nom::IResult<I, Either<O1, O2>, E>
+where
+    I: Clone,
+    P1: Parser<I, O1, E>,
+    P2: Parser<I, O2, E>,
+    E: ParseError<I>,
+{
+    let p1 = p1.map(Either::Left);
+    let p2 = p2.map(Either::Right);
+    alt((p1, p2))
+}
+
+trait IResultExt: Sized {
+    fn or_expected(self, expected: &'static str) -> Self;
+}
+
+impl<'a, T> IResultExt for Result<T, nom::Err<ParseError_<'a>>> {
+    fn or_expected(mut self, expected: &'static str) -> Self {
+        if let Some(nom::Err::Error(err) | nom::Err::Failure(err)) =
+            self.as_mut().err()
+        {
+            err.expected = Some(expected);
+        }
+        self
+    }
+}
+
+// type IResult<'a, O, E = nom::error::VerboseError<&'a [TokenTree]>> =
+//     nom::IResult<&'a [TokenTree], O, E>;
+type IResult<'a, O, E = ParseError_<'a>> = nom::IResult<&'a [TokenTree], O, E>;
+
+pub fn parse(tokens: &[TokenTree]) -> Vec<Item> {
+    let (_, items) = parse_items_full(tokens).finish().unwrap();
+    items
+}
+
+fn parse_items_full(input: &[TokenTree]) -> IResult<'_, Vec<Item>> {
+    terminated(many0(parse_item), eof)(input)
+}
+
+fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
+    nom::branch::alt((
+        parse_fn_item.map(Item::FnItem),
+        parse_static_item.map(Item::StaticItem),
+        parse_extern_block.map(Item::ExternBlock),
+    ))(input)
+}
+
+fn parse_group<
+    'a,
+    E: ParseError<&'a [TokenTree]>,
+    O,
+    P: Parser<&'a [TokenTree], O, E>,
+>(
+    expected_delimiter: Delimiter, inner: P,
+) -> impl FnMut(&'a [TokenTree]) -> IResult<'a, O, E> {
+    let mut inner = terminated(inner, nom::combinator::eof);
+    move |input: &'a [TokenTree]| -> IResult<'a, O, E> {
+        let Some((TokenTree::Group(group), rest)) = input.split_first() else {
+            return Err(nom::Err::Error(
+                nom::error::ParseError::from_error_kind(input, ErrorKind::IsA),
+            ));
+        };
+        if group.delimiter != expected_delimiter {
+            return Err(nom::Err::Error(
+                nom::error::ParseError::from_error_kind(input, ErrorKind::IsA),
+            ));
+        }
+        inner.parse(&group.inner).map(|(_, output)| (rest, output))
+    }
+}
+
+fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
+    let (input, extern_token) =
+        nom::combinator::opt(parse_ident("extern"))(input)?;
+    let (input, fn_token) = parse_ident("fn")(input)?;
+    let rest = move |input| {
+        let (input, name) = parse_non_kw_ident(input)?;
+        let (input, args) = parse_fn_args(input)?;
+        let (input, return_type) =
+            opt(preceded(parse_joint_puncts("->"), parse_type))(input)?;
+        if let Ok((input, ())) = parse_joint_puncts(";")(input) {
+            Ok((
+                input,
+                FnItem {
+                    extern_token,
+                    fn_token,
+                    name: name.clone(),
+                    args,
+                    return_type,
+                    body: None,
+                },
+            ))
+        } else {
+            let (input, body) = parse_block(input)?;
+            Ok((
+                input,
+                FnItem {
+                    extern_token,
+                    fn_token,
+                    name: name.clone(),
+                    args,
+                    return_type,
+                    body: Some(body),
+                },
+            ))
+        }
+    };
+    cut(rest)(input)
+}
+
+#[test]
+fn atom_expr() {
+    let tokens = crate::lexer::lex(b"a");
+    assert!(parse_expression(&tokens).is_ok());
+
+    let tokens = crate::lexer::lex(b"{while b < c {} a}");
+    assert!(parse_block(&tokens).is_ok());
+}
+
+fn parse_block(input: &[TokenTree]) -> IResult<'_, Block> {
+    let inner = pair(parse_statements, opt(parse_expression.map(Box::new)));
+    parse_group(Delimiter::Brace, inner)
+        .map(|(statements, expr)| Block { statements, tail: expr })
+        .parse(input)
+}
+
+fn parse_statements(input: &[TokenTree]) -> IResult<'_, Vec<Statement>> {
+    many0(parse_statement)(input)
+}
+
+fn parse_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
+    alt((
+        terminated(parse_no_block_expression, parse_joint_puncts(";"))
+            .map(|expr| Statement::Expression(expr)),
+        terminated(parse_block_expression, opt(parse_joint_puncts(";")))
+            .map(|expr| Statement::Expression(expr)),
+        parse_let_statement,
+    ))(input)
+}
+
+fn parse_let_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
+    tuple((
+        parse_ident("let"),
+        parse_pattern,
+        opt(preceded(parse_joint_puncts(":"), parse_type)),
+        opt(preceded(parse_joint_puncts("="), parse_expression)),
+        parse_joint_puncts(";"),
+    ))
+    .map(|(_, pattern, type_, initializer, _)| Statement::LetStatement {
+        pattern,
+        type_,
+        initializer,
+    })
+    .parse(input)
+}
+
+fn parse_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    alt((parse_block_expression, parse_no_block_expression))(input)
+}
+
+fn parse_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    alt((
+        parse_block.map(Expression::Block),
+        parse_if_expression,
+        parse_loop_expression,
+        parse_match_expression,
+    ))(input)
+}
+
+fn parse_if_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, _if) = parse_ident("if")(input)?;
+    let (input, condition) = parse_no_block_expression(input)?;
+    let mut conditions = Some(vec![condition]);
+    let (input, block) = parse_block(input)?;
+    let mut blocks = Some(vec![block]);
+    let elseif = tuple((
+        parse_ident("else"),
+        parse_ident("if"),
+        parse_no_block_expression,
+        parse_block,
+    ));
+    let (input, (conditions, mut blocks)) = fold_many0(
+        elseif,
+        || (conditions.take().unwrap(), blocks.take().unwrap()),
+        |(mut conditions, mut blocks), (_, _, condition, block)| {
+            conditions.push(condition);
+            blocks.push(block);
+            (conditions, blocks)
+        },
+    )(input)?;
+    let (input, else_block) =
+        opt(preceded(parse_ident("else"), parse_block))(input)?;
+    blocks.extend(else_block);
+    Ok((input, Expression::If { conditions, blocks }))
+}
+
+fn parse_match_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, _match) = parse_ident("match")(input)?;
+    let (input, scrutinee) = parse_no_block_expression(input)?;
+    let inner = |_input| todo!("parsing match expressions");
+    let (input, arms) = parse_group(Delimiter::Brace, inner)(input)?;
+    Ok((input, Expression::Match { scrutinee: Box::new(scrutinee), arms }))
+}
+
+fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    alt((
+        tuple((
+            parse_ident("while"),
+            parse_no_block_expression.map(|a| dbg!(a)),
+            parse_block,
+        ))
+        .map(|(_, condition, body)| Expression::While {
+            condition: Box::new(condition),
+            body,
+        }),
+        tuple((parse_ident("for"), |input| todo!("for loop")))
+            .map(|(_, ())| todo!()),
+        tuple((parse_ident("loop"), parse_block))
+            .map(|(_, body)| Expression::Loop(body)),
+    ))(input)
+}
+
+fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, (mut atoms, operators)) = fold_many0(
+        tuple((parse_atom, parse_binop)),
+        || (vec![], vec![]),
+        |mut vs, items| {
+            vs.extend([items]);
+            vs
+        },
+    )(input)?;
+    let (input, last_atom) = parse_atom(input)?;
+    if atoms.is_empty() {
+        Ok((input, last_atom))
+    } else {
+        atoms.push(last_atom);
+        Ok((input, Expression::BinOpChain { operands: atoms, operators }))
+    }
+}
+
+fn parse_atom(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, atom) = alt((
+        parse_integer.map(Expression::Integer),
+        parse_non_kw_ident.map(|ident| Expression::Ident(ident.clone())),
+        parse_ident("_").map(|_| Expression::Wildcard),
+        parse_group(Delimiter::Parenthesis, |input| {
+            separated_list(parse_joint_puncts(","), parse_expression)
+                .map(Expression::Tuple)
+                .parse(input)
+        }),
+        parse_group(Delimiter::Bracket, |input| {
+            separated_list(parse_joint_puncts(","), parse_expression)
+                .map(Expression::Array)
+                .parse(input)
+        }),
+        tuple((parse_joint_puncts("-"), parse_atom))
+            .map(|(_, expr)| Expression::Neg(Box::new(expr))),
+        tuple((parse_joint_puncts("!"), parse_atom))
+            .map(|(_, expr)| Expression::Not(Box::new(expr))),
+        tuple((parse_joint_puncts("*"), parse_atom))
+            .map(|(_, expr)| Expression::Deref(Box::new(expr))),
+        tuple((parse_joint_puncts("&"), parse_atom))
+            .map(|(_, expr)| Expression::AddrOf(Box::new(expr))),
+    ))(input)?;
+    let index = parse_group(Delimiter::Bracket, parse_expression);
+    let cast = preceded(parse_ident("as"), parse_type);
+    let (input, tails) = many0(either(index, cast))(input)?;
+    if tails.is_empty() {
+        Ok((input, atom))
+    } else {
+        todo!()
+    }
+}
+
+#[test]
+fn test_atoms() {
+    use crate::lexer::lex;
+    let tokens = lex("!&*&!*&a".as_bytes());
+    let ast = parse_atom(&tokens);
+    assert!(ast.is_ok());
+    dbg!(ast);
+}
+
+const fn sorted_by_length_decreasing<const N: usize>(
+    mut strs: [&'static str; N],
+) -> [&'static str; N] {
+    let mut i = N;
+    while i > 0 {
+        let mut j = 0;
+        while j < i - 1 {
+            if strs[j].len() < strs[j + 1].len() {
+                (strs[j], strs[j + 1]) = (strs[j + 1], strs[j]);
+            }
+            j += 1;
+        }
+        i -= 1;
+    }
+    strs
+}
+
+fn parse_binop(input: &[TokenTree]) -> IResult<'_, &'static str> {
+    // sorted longest first
+    static BINOPS: [&str; 31] = sorted_by_length_decreasing([
+        "+", "-", "*", "/", "%", "&&", "||", "&", "|", "^", ">>", "<<", "==",
+        "<=", ">=", "!=", "<", ">", "=", "+=", "-=", "*=", "/=", "%=", "&&=",
+        "||=", "&=", "|=", "^=", ">>=", "<<=",
+    ]);
+    for binop in BINOPS {
+        if let Ok((input, ())) = parse_joint_puncts(binop)(input) {
+            return Ok((input, binop));
+        }
+    }
+    return Err(nom::Err::Error(ParseError::from_error_kind(
+        input,
+        ErrorKind::IsA,
+    )))
+    .or_expected("a binary operator");
+}
+
+fn parse_fn_args(input: &[TokenTree]) -> IResult<'_, Vec<FnArg>> {
+    let inner = separated_list(parse_joint_puncts(","), parse_fn_arg);
+    parse_group(Delimiter::Parenthesis, inner)(input)
+}
+
+fn parse_fn_arg(input: &[TokenTree]) -> IResult<'_, FnArg> {
+    tuple((parse_pattern, parse_joint_puncts(":"), parse_type))
+        .map(|(pattern, _, type_)| FnArg { pattern, type_ })
+        .parse(input)
+}
+
+fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
+    let Some((TokenTree::Ident(ident), rest)) = input.split_first() else {
+        return Err(nom::Err::Error(ParseError::from_error_kind(
+            input,
+            ErrorKind::IsA,
+        )));
+    };
+    Ok((rest, ident))
+}
+
+fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
+    verify(parse_any_ident, |ident: &Ident| !lexer::is_keyword(&ident.ident))(
+        input,
+    )
+}
+
+fn parse_ident<'expected>(
+    expected: &'expected str,
+) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, ()> + 'expected {
+    move |input| {
+        nom::combinator::verify(parse_any_ident, |ident: &Ident| {
+            ident.ident == expected
+        })
+        .map(|_| ())
+        .parse(input)
+    }
+}
+
+fn parse_integer(input: &[TokenTree]) -> IResult<'_, Integer> {
+    let Some((TokenTree::Integer(integer), rest)) = input.split_first() else {
+        return Err(nom::Err::Error(ParseError::from_error_kind(
+            input,
+            ErrorKind::IsA,
+        )));
+    };
+    Ok((rest, *integer))
+}
+
+fn parse_joint_puncts<'expected>(
+    expected: &'expected str,
+) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, ()> + 'expected + Copy {
+    let expected = expected.as_bytes();
+    move |input: &[TokenTree]| -> IResult<'_, ()> {
+        if input.len() < expected.len() {
+            return Err(nom::Err::Error(ParseError::from_error_kind(
+                input,
+                ErrorKind::IsA,
+            )));
+        }
+        let (puncts, rest) = input.split_at(expected.len());
+        for (position, (expected, punct)) in
+            expected.iter().copied().zip(puncts).with_position()
+        {
+            if punct.as_punct().is_none_or(|punct| {
+                punct.c != expected
+                    || !(punct.joint_with_next
+                        || matches!(position, Position::Last | Position::Only))
+            }) {
+                return Err(nom::Err::Error(ParseError::from_error_kind(
+                    input,
+                    ErrorKind::IsA,
+                )));
+            }
+        }
+        Ok((rest, ()))
+    }
+}
+
+fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
+    map_opt(parse_any_ident, |ident: &Ident| match ident.ident.as_str() {
+        "const" => Some(false),
+        "mut" => Some(true),
+        _ => None,
+    })(input)
+}
+
+fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
+    if let Ok((input, ident)) = parse_non_kw_ident(input) {
+        return Ok((input, Type::Ident(ident.clone())));
+    } else if let Ok((input, ())) = parse_joint_puncts("*")(input) {
+        let (input, mutable) = parse_pointer_mutability(input)?;
+        let (input, inner) = parse_type(input)?;
+        Ok((input, Type::Pointer { mutable, inner: Box::new(inner) }))
+    } else {
+        todo!()
+    }
+}
+
+fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
+    let (input, static_token) = parse_ident("static")(input)?;
+    let (input, mut_token) = opt(parse_ident("mut"))(input)?;
+    let (input, name) = parse_non_kw_ident(input)?;
+    let (input, type_) = preceded(parse_joint_puncts(":"), parse_type)(input)?;
+    let (input, initializer) =
+        opt(preceded(parse_joint_puncts("="), parse_expression))(input)?;
+    let (input, _semi) = parse_joint_puncts(";")(input)?;
+    Ok((
+        input,
+        StaticItem {
+            static_token,
+            mut_token,
+            name: name.clone(),
+            type_,
+            initializer,
+        },
+    ))
+}
+
+fn parse_extern_block(input: &[TokenTree]) -> IResult<'_, ExternBlock> {
+    let (input, extern_token) = parse_ident("extern")(input)?;
+    let (input, items) =
+        parse_group(Delimiter::Brace, parse_items_full)(input)?;
+    Ok((input, ExternBlock { extern_token, items }))
+}
+
+fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
+    let (input, _) = not(eof)(input)?;
+    let mut basic = alt((
+        parse_ident("_").map(|_| Pattern::Wildcard),
+        pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
+            |(mutable, ident)| Pattern::Ident {
+                mutable: mutable.is_some(),
+                ident: ident.clone(),
+            },
+        ),
+    ));
+    if let Ok((input, pattern)) = basic(input) {
+        return Ok((input, pattern));
+    } else {
+        todo!()
+    }
+}

@@ -2,33 +2,40 @@ use crate::token::{Ident, Integer};
 
 #[derive(Debug)]
 pub enum Item {
-    ExternBlock { extern_token: (), items: Vec<Item> },
+    ExternBlock(ExternBlock),
     FnItem(FnItem),
     StaticItem(StaticItem),
 }
 
 #[derive(Debug)]
+pub struct ExternBlock {
+    pub extern_token: (),
+    pub items: Vec<Item>,
+}
+
+#[derive(Debug)]
 pub struct FnItem {
-    extern_token: Option<()>,
-    fn_token: (),
-    name: Ident,
-    args: Vec<FnArg>,
-    return_type: Option<Type>,
-    body: Option<Block>,
+    pub extern_token: Option<()>,
+    pub fn_token: (),
+    pub name: Ident,
+    pub args: Vec<FnArg>,
+    pub return_type: Option<Type>,
+    pub body: Option<Block>,
 }
 
 #[derive(Debug)]
 pub struct StaticItem {
-    static_token: (),
-    mut_token: Option<()>,
-    name: Ident,
-    initializer: Option<Expression>,
+    pub static_token: (),
+    pub mut_token: Option<()>,
+    pub name: Ident,
+    pub type_: Type,
+    pub initializer: Option<Expression>,
 }
 
 #[derive(Debug)]
 pub struct FnArg {
-    pattern: Pattern,
-    type_: Type,
+    pub pattern: Pattern,
+    pub type_: Type,
 }
 
 #[derive(Debug)]
@@ -36,12 +43,13 @@ pub enum Type {
     Pointer { mutable: bool, inner: Box<Type> },
     Array { inner: Box<Type>, length: usize },
     Ident(Ident),
+    Tuple(Vec<Type>),
 }
 
 #[derive(Debug)]
 pub enum Pattern {
     Wildcard,
-    Ident(Ident),
+    Ident { mutable: bool, ident: Ident },
 }
 
 #[derive(Debug)]
@@ -50,9 +58,17 @@ pub enum Expression {
     Integer(Integer),
     Bool(bool),
     Array(Vec<Expression>),
-    Derev(Box<Expression>),
+    Tuple(Vec<Expression>),
+    Deref(Box<Expression>),
+    AddrOf(Box<Expression>),
     Parenthesized(Box<Expression>),
+    /// TODO: remove this
+    BinOpChain {
+        operands: Vec<Expression>,
+        operators: Vec<&'static str>,
+    },
     Neg(Box<Expression>),
+    Not(Box<Expression>),
     Add(Box<Expression>, Box<Expression>),
     Sub(Box<Expression>, Box<Expression>),
     Mul(Box<Expression>, Box<Expression>),
@@ -78,18 +94,33 @@ pub enum Expression {
         condition: Box<Expression>,
         body: Block,
     },
+    Loop(Block),
     Block(Block),
     Return(Option<Box<Expression>>),
+    Match {
+        scrutinee: Box<Expression>,
+        arms: Vec<MatchArm>,
+    },
+    Wildcard,
 }
 
 #[derive(Debug)]
 pub struct Block {
-    statements: Vec<Statement>,
-    tail: Option<Box<Expression>>,
+    pub statements: Vec<Statement>,
+    pub tail: Option<Box<Expression>>,
 }
 
 #[derive(Debug)]
 pub enum Statement {
-    LetStatement { mutable: bool, name: Ident, initializer: Option<Expression> },
+    LetStatement {
+        pattern: Pattern,
+        type_: Option<Type>,
+        initializer: Option<Expression>,
+    },
     Expression(Expression),
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    todo_: (),
 }

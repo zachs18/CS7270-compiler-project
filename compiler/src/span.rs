@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+#[derive(Clone, Copy)]
 pub struct Span {
     span: copy_range::CopyRange<usize>,
 }

@@ -128,3 +128,19 @@ fn lex_until_closing_delimiter(
     }
     (tokens, idx)
 }
+
+pub fn is_keyword(s: &str) -> bool {
+    // copied from the Rust Reference for simplicity;
+    // we don't use all of these
+    match s {
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
+        | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let"
+        | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref"
+        | "return" | "self" | "Self" | "static" | "struct" | "super"
+        | "trait" | "true" | "type" | "unsafe" | "use" | "where" | "while"
+        | "async" | "await" | "dyn" | "abstract" | "become" | "box" | "do"
+        | "final" | "macro" | "override" | "priv" | "typeof" | "unsized"
+        | "virtual" | "yield" | "try" | "union" | "_" => true,
+        _ => false,
+    }
+}

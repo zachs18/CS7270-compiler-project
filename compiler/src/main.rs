@@ -4,6 +4,8 @@ use token::TokenTree;
 
 mod ast;
 mod lexer;
+mod parser;
+mod parser_nom;
 mod span;
 mod token;
 
@@ -35,9 +37,11 @@ fn main() -> ExitCode {
 
     let tokens: Vec<TokenTree> = lexer::lex(source.as_bytes());
 
-    dbg!(tokens);
+    dbg!(&tokens);
 
-    todo!();
+    let items = parser_nom::parse(&tokens);
+
+    dbg!(&items);
 
     ExitCode::SUCCESS
 }

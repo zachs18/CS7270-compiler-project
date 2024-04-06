@@ -1,0 +1,85 @@
+list[x] = ( x ( ',' x )* ','? )?
+
+FILE: ITEM* eof
+
+ITEM: FNITEM | STATICITEM | EXTERNBLOCK
+
+FNITEM: 'extern'? 'fn' ident '(' list[TYPED_PATTERN] ')' (BLOCK | ';')
+
+TYPED_PATTERN: PATTERN ':' TYPE
+
+PATTERN:
+ | '_'
+ | ident
+ | 'mut' ident
+ | '(' list[PATTERN_WITH_ALT] ')'
+ | '[' list[PATTERN_WITH_ALT] ']'
+
+PATTERN_WITH_ALT: PATTERN ('|' PATTERN_WITH_ALT)?
+
+TYPE:
+ | ident
+ | '[' TYPE (';' integer)? ']'
+ | '(' list[TYPE] ')'
+ | '*' ('const' | 'mut') TYPE
+
+BLOCK: '{' STATEMENT* EXPRESSION? '}'
+
+STATEMENT:
+ | EXPRESSION ';'
+ | LET_STATEMENT
+// TODO: other statements?
+
+LET_STATEMENT: 'let' PATTERN ( ':' TYPE )? ( '=' EXPRESSION )? ';'
+
+EXPRESSION: EXPR_BLOCK | EXPR_NO_BLOCK
+
+EXPR_NO_BLOCK:
+ | OPERATOR_EXPRESSION
+// TODO: other expressions
+
+EXPR_BLOCK:
+ | BLOCK
+ | IF_EXPR
+ | MATCH_EXPR
+ | LOOP_EXPR
+
+IF_EXPR: 'if' EXPR_NO_BLOCK BLOCK ( 'else' 'if' EXPR_NO_BLOCK BLOCK )* ('else' BLOCK)?
+
+MATCH_EXPR: 'match' EXPR_NO_BLOCK '{' MATCH_ARMS '}'
+
+MATCH_ARMS: MATCH_ARM*
+
+MATCH_ARM: PATTERN '=>' EXPRESSION ','
+
+LOOP_EXPR:
+ | 'while' EXPR_NO_BLOCK BLOCK
+ | 'for' PATTERN 'in' EXPR_NO_BLOCK BLOCK
+ | 'loop' BLOCK
+
+// Note: operator precedence is handled later (not in the syntax itself)
+OPERATOR_EXPRESSION:
+ | ATOM ( BINOP ATOM )*
+
+BINOP: ARITH_BINOP | COMPARISON_BINOP | ASSIGN_BINOP
+
+// Note: longer punct-sequences need to be checked first
+ARITH_BINOP: '+' | '-' | '*' | '/' | '%' | '&&' | '||' | '&' | '|' | '^' | '>>' | '<<'
+COMPARISON_BINOP: '==' | '<=' | '>=' | '!=' | '<' | '>'
+ASSIGN_BINOP: '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&&=' | '||=' | '&=' | '|=' | '^=' | '>>=' | '<<='
+
+// a single "thing" including unary prefix and suffix operators
+ATOM: 
+ | integer
+ | ident
+ | '_'
+ | '(' list[EXPRESSION] ')'
+ | '[' list[EXPRESSION] ']'
+ | '-' ATOM
+ | '!' ATOM
+ | '*' ATOM
+ | '&' ATOM
+ | ATOM '[' EXPRESSION ']'
+ | ATOM 'as' TYPE
+
+STATICITEM: 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
