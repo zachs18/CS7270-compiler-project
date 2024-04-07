@@ -34,8 +34,9 @@ pub struct FnArg {
 
 #[derive(Debug)]
 pub enum Type {
-    Pointer { mutable: bool, inner: Box<Type> },
-    Array { inner: Box<Type>, length: usize },
+    Pointer { mutable: bool, pointee: Box<Type> },
+    Array { element: Box<Type>, length: u128 },
+    Slice { element: Box<Type> },
     Ident(Ident),
     Tuple(Vec<Type>),
 }

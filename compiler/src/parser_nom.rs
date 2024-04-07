@@ -99,6 +99,22 @@ where
     move |input| inner.parse(input)
 }
 
+/// Rust-style comma-separated lists, allowing a trailing comma, but not
+/// allowing a comma with nothing before it.
+fn comma_separated_list<'input, O, F>(
+    f: F,
+) -> impl FnMut(&'input [TokenTree]) -> IResult<'input, Vec<O>>
+where
+    F: for<'a> Parser<&'input [TokenTree], O, ParseError_<'input>>,
+{
+    fn sep(input: &[TokenTree]) -> IResult<'_, ()> {
+        parse_joint_puncts(";")(input)
+    }
+    let mut inner = opt(terminated(separated_list1(sep, f), opt(sep)))
+        .map(Option::unwrap_or_default);
+    move |input| inner.parse(input)
+}
+
 fn either<I, O1, O2, E, P1, P2>(
     p1: P1, p2: P2,
 ) -> impl FnMut(I) -> nom::IResult<I, Either<O1, O2>, E>
@@ -399,16 +415,14 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
         parse_integer.map(Expression::Integer),
         parse_non_kw_ident.map(|ident| Expression::Ident(ident.clone())),
         parse_ident("_").map(|_| Expression::Wildcard),
-        parse_group(Delimiter::Parenthesis, |input| {
-            separated_list(parse_joint_puncts(","), parse_expression)
-                .map(Expression::Tuple)
-                .parse(input)
-        }),
-        parse_group(Delimiter::Bracket, |input| {
-            separated_list(parse_joint_puncts(","), parse_expression)
-                .map(Expression::Array)
-                .parse(input)
-        }),
+        parse_group(
+            Delimiter::Parenthesis,
+            comma_separated_list(parse_expression).map(Expression::Tuple),
+        ),
+        parse_group(
+            Delimiter::Bracket,
+            comma_separated_list(parse_expression).map(Expression::Array),
+        ),
         tuple((parse_joint_puncts("-"), parse_unary_expression))
             .map(|(_, expr)| Expression::Neg(Box::new(expr))),
         tuple((parse_joint_puncts("!"), parse_unary_expression))
@@ -421,7 +435,7 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let index = parse_group(Delimiter::Bracket, parse_expression);
     let call = parse_group(
         Delimiter::Parenthesis,
-        separated_list(parse_joint_puncts(","), parse_expression),
+        comma_separated_list(parse_expression),
     );
     let (input, tails) = many0(either(index, call))(input)?;
     if tails.is_empty() {
@@ -433,6 +447,19 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     }
 }
 
+/// ```ignore
+/// UNARY_EXPR ( 'as' TYPE )*
+/// ```
+///
+/// A type-cast expression.
+///
+/// Examples:
+///
+/// ```ignore
+/// 42 as u8
+/// 42 as *mut u8
+/// &X as usize
+/// ```
 fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, unary_expression) = parse_unary_expression(input)?;
     let (input, tails) = many0(preceded(parse_ident("as"), parse_type))(input)?;
@@ -489,17 +516,24 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, &'static str> {
     .or_expected("a binary operator");
 }
 
+/// ```ignore
+/// '(' list[TYPED_PATTERN] ')'
+/// ```
 fn parse_fn_args(input: &[TokenTree]) -> IResult<'_, Vec<FnArg>> {
-    let inner = separated_list(parse_joint_puncts(","), parse_fn_arg);
+    let inner = comma_separated_list(parse_fn_arg);
     parse_group(Delimiter::Parenthesis, inner)(input)
 }
 
+/// ```ignore
+/// PATTERN ':' TYPE
+/// ```
 fn parse_fn_arg(input: &[TokenTree]) -> IResult<'_, FnArg> {
     tuple((parse_pattern, parse_joint_puncts(":"), parse_type))
         .map(|(pattern, _, type_)| FnArg { pattern, type_ })
         .parse(input)
 }
 
+/// Any identifier, including keywords.
 fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
     let Some((TokenTree::Ident(ident), rest)) = input.split_first() else {
         return Err(nom::Err::Error(ParseError::from_error_kind(
@@ -510,12 +544,14 @@ fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
     Ok((rest, ident))
 }
 
+/// Non-keyword identifiers.
 fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
     verify(parse_any_ident, |ident: &Ident| !lexer::is_keyword(&ident.ident))(
         input,
     )
 }
 
+/// Parse a specific identifier. May be a keyword.
 fn parse_ident<'expected>(
     expected: &'expected str,
 ) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, ()> + 'expected {
@@ -528,6 +564,7 @@ fn parse_ident<'expected>(
     }
 }
 
+/// Any integer token.
 fn parse_integer(input: &[TokenTree]) -> IResult<'_, Integer> {
     let Some((TokenTree::Integer(integer), rest)) = input.split_first() else {
         return Err(nom::Err::Error(ParseError::from_error_kind(
@@ -538,6 +575,10 @@ fn parse_integer(input: &[TokenTree]) -> IResult<'_, Integer> {
     Ok((rest, *integer))
 }
 
+/// Parse a specific sequence of punctuation characters not separated by
+/// whitespace.
+///
+/// For example, `parse_joint_puncts(">>=")` will match `>>=` but not `>> =`.
 fn parse_joint_puncts<'expected>(
     expected: &'expected str,
 ) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, ()> + 'expected + Copy {
@@ -568,6 +609,7 @@ fn parse_joint_puncts<'expected>(
     }
 }
 
+/// `const` (false) or `mut` (true)
 fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
     map_opt(parse_any_ident, |ident: &Ident| match ident.ident.as_str() {
         "const" => Some(false),
@@ -576,16 +618,51 @@ fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
     })(input)
 }
 
+/// ```ignore
+/// | ident
+/// | '[' TYPE (';' integer)? ']'
+/// | '(' list[TYPE] ')'
+/// | '*' ('const' | 'mut') TYPE
+/// ```
+///
+/// A type. Can be:
+///
+/// * a named type
+/// * an array or slice type
+/// * a tuple type or a parenthesized type
+/// * a pointer type
 fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
-    if let Ok((input, ident)) = parse_non_kw_ident(input) {
-        return Ok((input, Type::Ident(ident.clone())));
-    } else if let Ok((input, ())) = parse_joint_puncts("*")(input) {
-        let (input, mutable) = parse_pointer_mutability(input)?;
-        let (input, inner) = parse_type(input)?;
-        Ok((input, Type::Pointer { mutable, inner: Box::new(inner) }))
-    } else {
-        todo!()
-    }
+    let named_type = parse_non_kw_ident.map(|ident| Type::Ident(ident.clone()));
+    let pointer_type =
+        tuple((parse_joint_puncts("*"), parse_pointer_mutability, parse_type))
+            .map(|(_, mutable, pointee)| Type::Pointer {
+                mutable,
+                pointee: Box::new(pointee),
+            });
+    let array_or_slice_type = parse_group(
+        Delimiter::Bracket,
+        tuple((
+            parse_type,
+            opt(preceded(parse_joint_puncts(";"), parse_integer)),
+        ))
+        .map(|(element, length)| match length {
+            Some(length) => {
+                Type::Array { element: Box::new(element), length: length.value }
+            }
+            None => Type::Slice { element: Box::new(element) },
+        }),
+    );
+    // We can't just do `separated_list(',', parse_type)`, since that would
+    // treat `(u32)` as `(u32,)`.
+    let tuple_type = parse_group(
+        Delimiter::Parenthesis,
+        alt((
+            terminated(parse_type, eof),
+            comma_separated_list(parse_type).map(|types| Type::Tuple(types)),
+        )),
+    );
+
+    alt((named_type, pointer_type, tuple_type, array_or_slice_type))(input)
 }
 
 /// ```ignore
