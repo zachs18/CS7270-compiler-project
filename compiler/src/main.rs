@@ -4,8 +4,8 @@ use token::TokenTree;
 
 mod ast;
 mod lexer;
-mod parser;
 mod parser_nom;
+mod parser_old;
 mod span;
 mod token;
 
