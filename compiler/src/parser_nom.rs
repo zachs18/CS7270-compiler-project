@@ -172,6 +172,32 @@ fn parse_group<
     }
 }
 
+/// ```ignore
+/// 'extern'? 'fn' ident '(' list[TYPED_PATTERN] ')' ( BLOCK | ';' )
+/// ```
+///
+/// A function item.
+///
+/// If `extern` is not present, then `BLOCK` must be present, and this defines
+/// an internal, non-exported function.
+///
+/// If `extern` is present and `BLOCK` is present, this defines an
+/// exported function.
+///
+/// If `extern` is present and `BLOCK` is not present, this declares an
+/// external function that is defined elsewhere.
+///
+/// Examples:
+///
+/// ```ignore
+/// extern fn memcpy(dst: *mut void, src: *const void, n: usize) -> *mut void;
+/// extern fn main(argc: i32, argv: *mut *mut i8) -> i32 {
+///     let x = 4 + 3;
+/// }
+/// fn foobar(x: *mut [u32; 10]) {
+///     x[4] = 3;
+/// }
+/// ```
 fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
     let (input, extern_token) =
         nom::combinator::opt(parse_ident("extern"))(input)?;
@@ -518,6 +544,35 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
     }
 }
 
+/// ```ignore
+/// 'extern'? 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
+/// ```
+///
+/// A static item.
+///
+/// If `mut` is present, the item is mutable. If `mut` is not present, the item
+/// is not mutable (including by external code!).
+///
+/// If `extern` is not present, then `EXPRESSION` must be present, and this
+/// defines an internal, non-exported static item.
+///
+/// If `extern` is present and `EXPRESSION` is present, this defines an
+/// exported static item.
+///
+/// If `extern` is present and `EXPRESSION` is not present, this declares an
+/// external static item that is defined elsewhere.
+///
+/// Examples:
+///
+/// ```ignore
+/// extern fn memcpy(dst: *mut void, src: *const void, n: usize) -> *mut void;
+/// extern fn main(argc: i32, argv: *mut *mut i8) -> i32 {
+///     let x = 4 + 3;
+/// }
+/// fn foobar(x: *mut [u32; 10]) {
+///     x[4] = 3;
+/// }
+/// ```
 fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     let (input, extern_token) = opt(parse_ident("static"))(input)?;
     let (input, static_token) = parse_ident("static")(input)?;
