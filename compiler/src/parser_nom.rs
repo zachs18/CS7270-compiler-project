@@ -350,25 +350,52 @@ fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 }
 
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
-    let (input, (mut atoms, operators)) = fold_many0(
-        tuple((parse_atom, parse_binop)),
+    let (input, (mut operands, operators)) = fold_many0(
+        tuple((parse_cast_expression, parse_binop)),
         || (vec![], vec![]),
         |mut vs, items| {
             vs.extend([items]);
             vs
         },
     )(input)?;
-    let (input, last_atom) = parse_atom(input)?;
-    if atoms.is_empty() {
-        Ok((input, last_atom))
+    let (input, last_operand) = parse_cast_expression(input)?;
+    if operands.is_empty() {
+        Ok((input, last_operand))
     } else {
-        atoms.push(last_atom);
-        Ok((input, Expression::BinOpChain { operands: atoms, operators }))
+        operands.push(last_operand);
+        Ok((input, Expression::BinOpChain { operands, operators }))
     }
 }
 
-fn parse_atom(input: &[TokenTree]) -> IResult<'_, Expression> {
-    let (input, atom) = alt((
+/// ```ignore
+///  | integer
+///  | ident
+///  | '_'
+///  | '(' list[EXPRESSION] ')'
+///  | '[' list[EXPRESSION] ']'
+///  | '-' UNARY_EXPR
+///  | '!' UNARY_EXPR
+///  | '*' UNARY_EXPR
+///  | '&' UNARY_EXPR
+///  | UNARY_EXPR '[' EXPRESSION ']'
+///  | UNARY_EXPR '(' list[EXPRESSION] ')'
+/// ```
+///
+/// An expression containing no top-level binary operators (there can be
+/// binary operators in parentheses, arrays, function call arguments, etc).
+///
+/// Examples:
+///
+/// ```ignore
+/// 42
+/// &hello
+/// (43 + 7)
+/// my_function(42, 7 + 3)
+/// !my_function(X, 42)
+/// &(*get_ptr(42))[3]
+/// ```
+fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, unary_expression) = alt((
         parse_integer.map(Expression::Integer),
         parse_non_kw_ident.map(|ident| Expression::Ident(ident.clone())),
         parse_ident("_").map(|_| Expression::Wildcard),
@@ -382,34 +409,47 @@ fn parse_atom(input: &[TokenTree]) -> IResult<'_, Expression> {
                 .map(Expression::Array)
                 .parse(input)
         }),
-        tuple((parse_joint_puncts("-"), parse_atom))
+        tuple((parse_joint_puncts("-"), parse_unary_expression))
             .map(|(_, expr)| Expression::Neg(Box::new(expr))),
-        tuple((parse_joint_puncts("!"), parse_atom))
+        tuple((parse_joint_puncts("!"), parse_unary_expression))
             .map(|(_, expr)| Expression::Not(Box::new(expr))),
-        tuple((parse_joint_puncts("*"), parse_atom))
+        tuple((parse_joint_puncts("*"), parse_unary_expression))
             .map(|(_, expr)| Expression::Deref(Box::new(expr))),
-        tuple((parse_joint_puncts("&"), parse_atom))
+        tuple((parse_joint_puncts("&"), parse_unary_expression))
             .map(|(_, expr)| Expression::AddrOf(Box::new(expr))),
     ))(input)?;
     let index = parse_group(Delimiter::Bracket, parse_expression);
-    let cast = preceded(parse_ident("as"), parse_type);
     let call = parse_group(
         Delimiter::Parenthesis,
         separated_list(parse_joint_puncts(","), parse_expression),
     );
-    let (input, tails) = many0(either(index, either(cast, call)))(input)?;
+    let (input, tails) = many0(either(index, call))(input)?;
     if tails.is_empty() {
-        Ok((input, atom))
+        // There were only prefix operators, don't need to do precedence stuff
+        Ok((input, unary_expression))
     } else {
+        // Need to do precedence stuff
+        todo!()
+    }
+}
+
+fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, unary_expression) = parse_unary_expression(input)?;
+    let (input, tails) = many0(preceded(parse_ident("as"), parse_type))(input)?;
+    if tails.is_empty() {
+        // There were no casts, don't need to do precedence stuff
+        Ok((input, unary_expression))
+    } else {
+        // Need to do precedence stuff
         todo!()
     }
 }
 
 #[test]
-fn test_atoms() {
+fn test_unary_expressions() {
     use crate::lexer::lex;
     let tokens = lex("!&*&!*&a".as_bytes());
-    let ast = parse_atom(&tokens);
+    let ast = parse_unary_expression(&tokens);
     assert!(ast.is_ok());
 }
 
@@ -431,11 +471,11 @@ const fn sorted_by_length_decreasing<const N: usize>(
 }
 
 fn parse_binop(input: &[TokenTree]) -> IResult<'_, &'static str> {
-    // sorted longest first
-    static BINOPS: [&str; 31] = sorted_by_length_decreasing([
+    // sorted longest first to avoid parsing ambiguity
+    static BINOPS: [&str; 33] = sorted_by_length_decreasing([
         "+", "-", "*", "/", "%", "&&", "||", "&", "|", "^", ">>", "<<", "==",
         "<=", ">=", "!=", "<", ">", "=", "+=", "-=", "*=", "/=", "%=", "&&=",
-        "||=", "&=", "|=", "^=", ">>=", "<<=",
+        "||=", "&=", "|=", "^=", ">>=", "<<=", "..", "..=",
     ]);
     for binop in BINOPS {
         if let Ok((input, ())) = parse_joint_puncts(binop)(input) {

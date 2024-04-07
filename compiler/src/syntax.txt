@@ -61,7 +61,7 @@ LOOP_EXPR:
 
 // Note: operator precedence is handled later (not in the syntax itself)
 OPERATOR_EXPRESSION:
- | ATOM ( BINOP ATOM )*
+ | CAST_EXPR ( BINOP CAST_EXPR )*
 
 BINOP: ARITH_BINOP | COMPARISON_BINOP | ASSIGN_BINOP
 
@@ -69,18 +69,22 @@ BINOP: ARITH_BINOP | COMPARISON_BINOP | ASSIGN_BINOP
 ARITH_BINOP: '+' | '-' | '*' | '/' | '%' | '&&' | '||' | '&' | '|' | '^' | '>>' | '<<'
 COMPARISON_BINOP: '==' | '<=' | '>=' | '!=' | '<' | '>'
 ASSIGN_BINOP: '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&&=' | '||=' | '&=' | '|=' | '^=' | '>>=' | '<<='
+RANGE_BINOP: '..' | '..='
 
 // a single "thing" including unary prefix and suffix operators
-ATOM: 
+// Note: operator precedence is handled later (not in the syntax itself)
+UNARY_EXPR:
  | integer
  | ident
  | '_'
  | '(' list[EXPRESSION] ')'
  | '[' list[EXPRESSION] ']'
- | '-' ATOM
- | '!' ATOM
- | '*' ATOM
- | '&' ATOM
- | ATOM '[' EXPRESSION ']'
- | ATOM 'as' TYPE
- | ATOM '(' list[EXPRESSION] ')'
+ | '-' UNARY_EXPR
+ | '!' UNARY_EXPR
+ | '*' UNARY_EXPR
+ | '&' UNARY_EXPR
+ | UNARY_EXPR '[' EXPRESSION ']'
+ | UNARY_EXPR '(' list[EXPRESSION] ')'
+
+// Separate from UNARY_EXPR since `x as u64[42]` doesn't make sense
+CAST_EXPR: UNARY_EXPR ( 'as' TYPE )*
