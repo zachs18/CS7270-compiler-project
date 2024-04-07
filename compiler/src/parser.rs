@@ -348,21 +348,80 @@ fn parse_match_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 }
 
 fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
-    alt((
-        tuple((
-            parse_ident("while"),
-            parse_no_block_expression.map(|a| dbg!(a)),
-            parse_block,
-        ))
-        .map(|(_, condition, body)| Expression::While {
+    alt((parse_while_loop, parse_for_loop, parse_loop_loop))(input)
+}
+
+/// ```ignore
+/// 'while' EXPR_NO_BLOCK BLOCK
+/// ```
+///
+/// A while loop. The condition must be of type `bool`, and the block must
+/// evaluate to `()`.
+///
+/// # Examples:
+///
+/// ```ignore
+/// while true {}
+/// while i < 42 { i += 1; }
+/// ```
+fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, _) = parse_ident("while")(input)?;
+    let tail = tuple((parse_no_block_expression, parse_block)).map(
+        |(condition, body)| Expression::While {
             condition: Box::new(condition),
             body,
-        }),
-        tuple((parse_ident("for"), |_input| todo!("for loop")))
-            .map(|(_, ())| todo!()),
-        tuple((parse_ident("loop"), parse_block))
-            .map(|(_, body)| Expression::Loop(body)),
-    ))(input)
+        },
+    );
+    // Cut because we already saw a `while` token, so we know this is a while
+    // loop.
+    cut(tail)(input)
+}
+
+/// ```ignore
+/// 'for' PATTERN 'in' EXPR_NO_BLOCK BLOCK
+/// ```
+///
+/// A for loop. The pattern must be infallible and of the same type as the
+/// iterable's element, and the block must evaluate to `()`.
+///
+/// # Examples:
+///
+/// ```ignore
+/// for i in 0..10 {}
+/// ```
+fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, _) = parse_ident("for")(input)?;
+    let tail = tuple((
+        parse_pattern,
+        parse_ident("in"),
+        parse_no_block_expression,
+        parse_block,
+    ))
+    .map(|(pattern, _, iterable, body)| todo!("for loop"));
+    // Cut because we already saw a `for` token, so we know this is a for
+    // loop.
+    cut(tail)(input)
+}
+
+/// ```ignore
+/// 'loop' BLOCK
+/// ```
+///
+/// An infinite loop. The block must evaluate to `()`.
+///
+/// # Examples:
+///
+/// ```ignore
+/// loop {}
+/// loop {
+///     if i == 42 { break; } // TODO: break expressions
+/// }
+/// ```
+fn parse_loop_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, _) = parse_ident("loop")(input)?;
+    let tail = parse_block.map(Expression::Loop);
+    // Cut because we already saw a `loop` token, so we know this is a loop.
+    cut(tail)(input)
 }
 
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
