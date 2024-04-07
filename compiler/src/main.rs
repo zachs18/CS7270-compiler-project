@@ -4,7 +4,7 @@ use token::TokenTree;
 
 mod ast;
 mod lexer;
-mod parser_nom;
+mod parser;
 mod parser_old;
 mod span;
 mod token;
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
 
     dbg!(&tokens);
 
-    let items = parser_nom::parse(&tokens);
+    let items = parser::parse(&tokens);
 
     dbg!(&items);
 
