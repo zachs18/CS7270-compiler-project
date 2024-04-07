@@ -1,6 +1,6 @@
 use crate::{
-    ast::{self, Block, ExternBlock, FnItem, Item, Pattern, Type},
-    token::{Delimiter, Punct, TokenTree},
+    ast::{self, Block, FnItem, Item, Pattern, Type},
+    token::{Delimiter, TokenTree},
 };
 
 pub fn parse(tokens: &[TokenTree]) -> Vec<ast::Item> {
@@ -102,7 +102,6 @@ fn parse_item(
 ) -> Option<(ast::Item, usize)> {
     map(parse_fn_item, Item::FnItem)(tokens, start)
         .or_else(|| map(parse_static_item, Item::StaticItem)(tokens, start))
-        .or_else(|| map(parse_extern_block, Item::ExternBlock)(tokens, start))
 }
 
 fn parse_fn_item(
@@ -210,21 +209,4 @@ fn parse_static_item(
     tokens: &[TokenTree], start: usize,
 ) -> Option<(ast::StaticItem, usize)> {
     todo!()
-}
-
-/// `extern` followed by a `Brace` group containing items
-fn parse_extern_block(
-    tokens: &[TokenTree], start: usize,
-) -> Option<(ast::ExternBlock, usize)> {
-    if tokens.get(start)?.as_ident()?.ident.as_str() != "extern" {
-        return None;
-    }
-    let group = tokens.get(start + 1)?.as_group()?;
-    if group.delimiter != Delimiter::Brace {
-        return None;
-    }
-    let inner = &group.inner;
-    let (items, end) = parse_items(inner, 0);
-    assert_eq!(end, inner.len());
-    Some((ExternBlock { extern_token: (), items }, start + 2))
 }

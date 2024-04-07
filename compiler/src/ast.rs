@@ -2,15 +2,8 @@ use crate::token::{Ident, Integer};
 
 #[derive(Debug)]
 pub enum Item {
-    ExternBlock(ExternBlock),
     FnItem(FnItem),
     StaticItem(StaticItem),
-}
-
-#[derive(Debug)]
-pub struct ExternBlock {
-    pub extern_token: (),
-    pub items: Vec<Item>,
 }
 
 #[derive(Debug)]
@@ -25,6 +18,7 @@ pub struct FnItem {
 
 #[derive(Debug)]
 pub struct StaticItem {
+    pub extern_token: Option<()>,
     pub static_token: (),
     pub mut_token: Option<()>,
     pub name: Ident,

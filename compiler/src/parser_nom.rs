@@ -14,8 +14,8 @@ use zachs18_stdx::OptionExt;
 
 use crate::{
     ast::{
-        Block, Expression, ExternBlock, FnArg, FnItem, Item, Pattern,
-        Statement, StaticItem, Type,
+        Block, Expression, FnArg, FnItem, Item, Pattern, Statement, StaticItem,
+        Type,
     },
     lexer::{self, is_keyword},
     token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
@@ -145,7 +145,6 @@ fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
     nom::branch::alt((
         parse_fn_item.map(Item::FnItem),
         parse_static_item.map(Item::StaticItem),
-        parse_extern_block.map(Item::ExternBlock),
     ))(input)
 }
 
@@ -520,6 +519,7 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
 }
 
 fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
+    let (input, extern_token) = opt(parse_ident("static"))(input)?;
     let (input, static_token) = parse_ident("static")(input)?;
     let (input, mut_token) = opt(parse_ident("mut"))(input)?;
     let (input, name) = parse_non_kw_ident(input)?;
@@ -530,6 +530,7 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     Ok((
         input,
         StaticItem {
+            extern_token,
             static_token,
             mut_token,
             name: name.clone(),
@@ -537,13 +538,6 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
             initializer,
         },
     ))
-}
-
-fn parse_extern_block(input: &[TokenTree]) -> IResult<'_, ExternBlock> {
-    let (input, extern_token) = parse_ident("extern")(input)?;
-    let (input, items) =
-        parse_group(Delimiter::Brace, parse_items_full)(input)?;
-    Ok((input, ExternBlock { extern_token, items }))
 }
 
 fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {

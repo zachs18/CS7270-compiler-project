@@ -2,9 +2,11 @@ list[x] = ( x ( ',' x )* ','? )?
 
 FILE: ITEM* eof
 
-ITEM: FNITEM | STATICITEM | EXTERNBLOCK
+ITEM: FNITEM | STATICITEM
 
 FNITEM: 'extern'? 'fn' ident '(' list[TYPED_PATTERN] ')' (BLOCK | ';')
+
+STATICITEM: 'extern'? 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
 
 TYPED_PATTERN: PATTERN ':' TYPE
 
@@ -81,5 +83,3 @@ ATOM:
  | '&' ATOM
  | ATOM '[' EXPRESSION ']'
  | ATOM 'as' TYPE
-
-STATICITEM: 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
