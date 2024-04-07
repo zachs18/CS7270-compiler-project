@@ -393,7 +393,11 @@ fn parse_atom(input: &[TokenTree]) -> IResult<'_, Expression> {
     ))(input)?;
     let index = parse_group(Delimiter::Bracket, parse_expression);
     let cast = preceded(parse_ident("as"), parse_type);
-    let (input, tails) = many0(either(index, cast))(input)?;
+    let call = parse_group(
+        Delimiter::Parenthesis,
+        separated_list(parse_joint_puncts(","), parse_expression),
+    );
+    let (input, tails) = many0(either(index, either(cast, call)))(input)?;
     if tails.is_empty() {
         Ok((input, atom))
     } else {
