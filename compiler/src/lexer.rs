@@ -1,6 +1,6 @@
 use crate::token::{Delimiter, Group, Ident, Integer, Punct, TokenTree};
 
-pub fn lex(src: &[u8]) -> Vec<TokenTree> {
+pub fn lex(src: &'static [u8]) -> Vec<TokenTree> {
     let (tokens, end) = lex_until_closing_delimiter(src, 0);
     if end != src.len() {
         panic!("unmatched closing delimiter at {end}");
@@ -45,7 +45,7 @@ fn delimiter(b: u8) -> Option<(Delimiter, u8)> {
 }
 
 fn lex_until_closing_delimiter(
-    src: &[u8], start: usize,
+    src: &'static [u8], start: usize,
 ) -> (Vec<TokenTree>, usize) {
     let mut tokens = vec![];
     let mut idx = start;
@@ -61,8 +61,7 @@ fn lex_until_closing_delimiter(
                 }
                 tokens.push(TokenTree::Ident(Ident {
                     ident: std::str::from_utf8(&src[start..idx])
-                        .expect("valid UTF-8 source")
-                        .to_owned(),
+                        .expect("valid UTF-8 source"),
                     span: (start..idx).into(),
                 }));
                 prev_byte_was_punct = false;

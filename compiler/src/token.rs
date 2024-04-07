@@ -51,9 +51,9 @@ impl std::fmt::Debug for TokenTree {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Ident {
-    pub ident: String,
+    pub ident: &'static str,
     pub span: Span,
 }
 

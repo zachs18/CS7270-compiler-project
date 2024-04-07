@@ -5,7 +5,6 @@ use token::TokenTree;
 mod ast;
 mod lexer;
 mod parser;
-mod parser_old;
 mod span;
 mod token;
 
@@ -34,6 +33,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // Leak the source so we can reference it in the tokens and ast without
+    // adding lifetimes everywhere.
+    let source = String::leak(source);
 
     let tokens: Vec<TokenTree> = lexer::lex(source.as_bytes());
 

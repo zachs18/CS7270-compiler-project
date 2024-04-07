@@ -229,7 +229,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                 FnItem {
                     extern_token,
                     fn_token,
-                    name: name.clone(),
+                    name,
                     args,
                     return_type,
                     body: None,
@@ -242,7 +242,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                 FnItem {
                     extern_token,
                     fn_token,
-                    name: name.clone(),
+                    name,
                     args,
                     return_type,
                     body: Some(body),
@@ -413,7 +413,7 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, unary_expression) = alt((
         parse_integer.map(Expression::Integer),
-        parse_non_kw_ident.map(|ident| Expression::Ident(ident.clone())),
+        parse_non_kw_ident.map(Expression::Ident),
         parse_ident("_").map(|_| Expression::Wildcard),
         parse_group(
             Delimiter::Parenthesis,
@@ -534,8 +534,8 @@ fn parse_fn_arg(input: &[TokenTree]) -> IResult<'_, FnArg> {
 }
 
 /// Any identifier, including keywords.
-fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
-    let Some((TokenTree::Ident(ident), rest)) = input.split_first() else {
+fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, Ident> {
+    let Some((&TokenTree::Ident(ident), rest)) = input.split_first() else {
         return Err(nom::Err::Error(ParseError::from_error_kind(
             input,
             ErrorKind::IsA,
@@ -545,7 +545,7 @@ fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
 }
 
 /// Non-keyword identifiers.
-fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, &Ident> {
+fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, Ident> {
     verify(parse_any_ident, |ident: &Ident| !lexer::is_keyword(&ident.ident))(
         input,
     )
@@ -611,7 +611,7 @@ fn parse_joint_puncts<'expected>(
 
 /// `const` (false) or `mut` (true)
 fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
-    map_opt(parse_any_ident, |ident: &Ident| match ident.ident.as_str() {
+    map_opt(parse_any_ident, |ident: Ident| match ident.ident {
         "const" => Some(false),
         "mut" => Some(true),
         _ => None,
@@ -632,7 +632,7 @@ fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
 /// * a tuple type or a parenthesized type
 /// * a pointer type
 fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
-    let named_type = parse_non_kw_ident.map(|ident| Type::Ident(ident.clone()));
+    let named_type = parse_non_kw_ident.map(Type::Ident);
     let pointer_type =
         tuple((parse_joint_puncts("*"), parse_pointer_mutability, parse_type))
             .map(|(_, mutable, pointee)| Type::Pointer {
@@ -709,7 +709,7 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
             extern_token,
             static_token,
             mut_token,
-            name: name.clone(),
+            name,
             type_,
             initializer,
         },
@@ -725,7 +725,7 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
         pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
             |(mutable, ident)| Pattern::Ident {
                 mutable: mutable.is_some(),
-                ident: ident.clone(),
+                ident,
             },
         ),
     ));
