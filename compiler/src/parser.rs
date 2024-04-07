@@ -36,7 +36,7 @@ impl<'a> fmt::Debug for ParseError_<'a> {
 
 impl fmt::Display for ParseError_<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "at {}: ", self.backtrace)?;
+        write!(f, "\ncreated at {}: ", self.backtrace)?;
         if let Some(expected) = self.expected {
             write!(f, "expected {expected}, ")?;
         }
@@ -108,7 +108,7 @@ where
     F: for<'a> Parser<&'input [TokenTree], O, ParseError_<'input>>,
 {
     fn sep(input: &[TokenTree]) -> IResult<'_, ()> {
-        parse_joint_puncts(";")(input)
+        parse_joint_puncts(",")(input)
     }
     let mut inner = opt(terminated(separated_list1(sep, f), opt(sep)))
         .map(Option::unwrap_or_default);
@@ -415,6 +415,8 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
         parse_integer.map(Expression::Integer),
         parse_non_kw_ident.map(Expression::Ident),
         parse_ident("_").map(|_| Expression::Wildcard),
+        parse_ident("true").map(|_| Expression::Bool(true)),
+        parse_ident("false").map(|_| Expression::Bool(false)),
         parse_group(
             Delimiter::Parenthesis,
             comma_separated_list(parse_expression).map(Expression::Tuple),
@@ -733,5 +735,27 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
         return Ok((input, pattern));
     } else {
         todo!()
+    }
+}
+
+#[test]
+fn test_comma_separated() {
+    for src in ["", "42", "42,", "42,42"] {
+        let tokens = crate::lexer::lex(src.as_bytes());
+        let res = comma_separated_list(parse_integer)(&tokens).finish();
+        let (tokens, _) = res.unwrap();
+        assert!(tokens.is_empty(), "{src:?}: {tokens:?}");
+    }
+    for src in ["", "x: u32", "x: *mut u32,", "x: *mut u32, y: u64"] {
+        let tokens = crate::lexer::lex(src.as_bytes());
+        let res = comma_separated_list(parse_fn_arg)(&tokens).finish();
+        let (tokens, _) = res.unwrap();
+        assert!(tokens.is_empty(), "{src:?}: {tokens:?}");
+    }
+    for src in ["()", "(x: u32)", "(x: *mut u32,)", "(x: *mut u32, y: u64)"] {
+        let tokens = crate::lexer::lex(src.as_bytes());
+        let res = parse_fn_args(&tokens).finish();
+        let (tokens, _) = res.unwrap();
+        assert!(tokens.is_empty(), "{src:?}: {tokens:?}");
     }
 }

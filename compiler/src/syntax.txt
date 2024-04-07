@@ -76,6 +76,8 @@ RANGE_BINOP: '..' | '..='
 UNARY_EXPR:
  | integer
  | ident
+ | 'true'
+ | 'false'
  | '_'
  | '(' list[EXPRESSION] ')'
  | '[' list[EXPRESSION] ']'
