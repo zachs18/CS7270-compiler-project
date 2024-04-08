@@ -39,6 +39,7 @@ pub enum Type {
     Slice { element: Box<Type> },
     Ident(Ident),
     Tuple(Vec<Type>),
+    Never,
 }
 
 #[derive(Debug)]

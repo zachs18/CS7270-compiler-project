@@ -909,6 +909,7 @@ fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
 /// * a pointer type
 fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
     let named_type = parse_non_kw_ident.map(Type::Ident);
+    let never_type = parse_joint_puncts("!").map(|_| Type::Never);
     let pointer_type =
         tuple((parse_joint_puncts("*"), parse_pointer_mutability, parse_type))
             .map(|(_, mutable, pointee)| Type::Pointer {
@@ -940,6 +941,7 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
 
     alt((
         named_type,
+        never_type,
         pointer_type,
         tuple_or_parenthesized_type,
         array_or_slice_type,
