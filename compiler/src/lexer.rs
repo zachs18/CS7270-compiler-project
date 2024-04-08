@@ -53,6 +53,12 @@ fn lex_until_closing_delimiter(
     loop {
         match src.get(idx) {
             None | Some(b']' | b'}' | b')') => break,
+            Some(b'/') if src.get(idx + 1) == Some(&b'/') => {
+                idx += 2;
+                while src.get(idx).is_some_and(|&b| b != b'\r' && b != b'\n') {
+                    idx += 1;
+                }
+            }
             Some(&c) if is_ident_start(c) => {
                 let start = idx;
                 idx += 1;
