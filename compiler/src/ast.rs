@@ -45,6 +45,10 @@ pub enum Type {
 pub enum Pattern {
     Wildcard,
     Ident { mutable: bool, ident: Ident },
+    Integer(Integer),
+    Alt(Vec<Self>),
+    Array(Vec<Self>),
+    Tuple(Vec<Self>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,5 +205,6 @@ pub enum Statement {
 
 #[derive(Debug)]
 pub struct MatchArm {
-    todo_: (),
+    pub pattern: Pattern,
+    pub expression: Expression,
 }

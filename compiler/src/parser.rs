@@ -15,7 +15,7 @@ use zachs18_stdx::OptionExt;
 use crate::{
     ast::{
         ArithmeticOp, Associativity, BinaryOp, Block, ComparisonOp, Expression,
-        FnArg, FnItem, Item, Pattern, Statement, StaticItem, Type,
+        FnArg, FnItem, Item, MatchArm, Pattern, Statement, StaticItem, Type,
     },
     lexer::{self, is_keyword},
     token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
@@ -342,9 +342,15 @@ fn parse_if_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 fn parse_match_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, _match) = parse_ident("match")(input)?;
     let (input, scrutinee) = parse_no_block_expression(input)?;
-    let inner = |_input| todo!("parsing match expressions");
+    let inner = comma_separated_list(parse_match_arm);
     let (input, arms) = parse_group(Delimiter::Brace, inner)(input)?;
     Ok((input, Expression::Match { scrutinee: Box::new(scrutinee), arms }))
+}
+
+fn parse_match_arm(input: &[TokenTree]) -> IResult<'_, MatchArm> {
+    tuple((parse_pattern_with_alt, parse_joint_puncts("=>"), parse_expression))
+        .map(|(pattern, _, expression)| MatchArm { pattern, expression })
+        .parse(input)
 }
 
 fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
@@ -676,6 +682,7 @@ const fn sorted_by_length_decreasing<const N: usize, T: Copy>(
     ops
 }
 
+/// Parse a binary operator, e.g. `+`, `||=`, `<<`.
 fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
     use ArithmeticOp as A;
     use BinaryOp as B;
@@ -866,7 +873,7 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
     );
     // We can't just do `separated_list(',', parse_type)`, since that would
     // treat `(u32)` as `(u32,)`.
-    let tuple_type = parse_group(
+    let tuple_or_parenthesized_type = parse_group(
         Delimiter::Parenthesis,
         alt((
             terminated(parse_type, eof),
@@ -874,7 +881,12 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
         )),
     );
 
-    alt((named_type, pointer_type, tuple_type, array_or_slice_type))(input)
+    alt((
+        named_type,
+        pointer_type,
+        tuple_or_parenthesized_type,
+        array_or_slice_type,
+    ))(input)
 }
 
 /// ```ignore
@@ -928,24 +940,64 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     ))
 }
 
+/// ```ignore
+/// | '_'
+/// | 'mut' ident
+/// | ident
+/// | '(' list[PATTERN_WITH_ALT] ')'
+/// | '[' list[PATTERN_WITH_ALT] ']'
+/// ```
 fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
     // TODO: remove once todo!() is implmented below;
     // this way we don't panic if there's nothing to parse anyway
     let (input, _) = not(eof)(input)?;
-    let mut basic = alt((
-        parse_ident("_").map(|_| Pattern::Wildcard),
-        pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
-            |(mutable, ident)| Pattern::Ident {
-                mutable: mutable.is_some(),
-                ident,
-            },
-        ),
-    ));
-    if let Ok((input, pattern)) = basic(input) {
-        return Ok((input, pattern));
-    } else {
-        todo!()
+    let wildcard_pattern = parse_ident("_").map(|_| Pattern::Wildcard);
+    let ident_pattern = pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
+        |(mutable, ident)| Pattern::Ident { mutable: mutable.is_some(), ident },
+    );
+    let integer_pattern = parse_integer.map(Pattern::Integer);
+    let array_pattern = parse_group(
+        Delimiter::Bracket,
+        comma_separated_list(parse_pattern_with_alt),
+    )
+    .map(|patterns| Pattern::Array(patterns));
+    let tuple_or_parenthesized_pattern = parse_group(
+        Delimiter::Parenthesis,
+        alt((
+            terminated(parse_pattern_with_alt, eof),
+            comma_separated_list(parse_pattern_with_alt)
+                .map(|patterns| Pattern::Tuple(patterns)),
+        )),
+    );
+    alt((
+        wildcard_pattern,
+        ident_pattern,
+        integer_pattern,
+        array_pattern,
+        tuple_or_parenthesized_pattern,
+    ))(input)
+}
+
+/// ```ignore
+/// '|'? PATTERN ('|' PATTERN)*
+/// // equivalently
+/// '|'? (PATTERN '|')* PATTERN
+/// ```
+fn parse_pattern_with_alt(input: &[TokenTree]) -> IResult<'_, Pattern> {
+    fn alt(input: &[TokenTree]) -> IResult<'_, ()> {
+        parse_joint_puncts("|")(input)
     }
+    let base =
+        tuple((opt(alt), many0(terminated(parse_pattern, alt)), parse_pattern));
+    let mut mapped = base.map(|(_, mut patterns, last_pattern)| {
+        if patterns.is_empty() {
+            last_pattern
+        } else {
+            patterns.push(last_pattern);
+            Pattern::Alt(patterns)
+        }
+    });
+    mapped.parse(input)
 }
 
 #[test]

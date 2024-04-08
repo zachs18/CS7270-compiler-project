@@ -14,10 +14,11 @@ PATTERN:
  | '_'
  | ident
  | 'mut' ident
+ | integer
  | '(' list[PATTERN_WITH_ALT] ')'
  | '[' list[PATTERN_WITH_ALT] ']'
 
-PATTERN_WITH_ALT: PATTERN ('|' PATTERN_WITH_ALT)?
+PATTERN_WITH_ALT: '|'? PATTERN ('|' PATTERN)*
 
 TYPE:
  | ident
@@ -50,11 +51,9 @@ EXPR_BLOCK:
 
 IF_EXPR: 'if' EXPR_NO_BLOCK BLOCK ( 'else' 'if' EXPR_NO_BLOCK BLOCK )* ('else' BLOCK)?
 
-MATCH_EXPR: 'match' EXPR_NO_BLOCK '{' MATCH_ARMS '}'
+MATCH_EXPR: 'match' EXPR_NO_BLOCK '{' list[MATCH_ARM] '}'
 
-MATCH_ARMS: MATCH_ARM*
-
-MATCH_ARM: PATTERN '=>' EXPRESSION ','
+MATCH_ARM: PATTERN_WITH_ALT '=>' EXPRESSION
 
 LOOP_EXPR:
  | 'while' EXPR_NO_BLOCK BLOCK
