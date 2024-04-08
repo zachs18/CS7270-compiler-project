@@ -38,8 +38,8 @@ LET_STATEMENT: 'let' PATTERN ( ':' TYPE )? ( '=' EXPRESSION )? ';'
 EXPRESSION: EXPR_BLOCK | EXPR_NO_BLOCK
 
 EXPR_NO_BLOCK:
- | `break` EXPR_NO_BLOCK
- | `return` EXPR_NO_BLOCK
+ | `break` EXPR_NO_BLOCK?
+ | `return` EXPR_NO_BLOCK?
  | OPERATOR_EXPRESSION
 // TODO: other expressions
 
@@ -73,6 +73,7 @@ ASSIGN_BINOP: '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&&=' | '||=' | '&=' | '|
 RANGE_BINOP: '..' | '..='
 
 // Separate the unary operators by precedence:
+// (return and break are lower precedence than binary operators, so are implemented in EXPR_NO_BLOCK)
 // CAST_EXPR because `as` casts bind loosest (lowest precedence)
 // then PREFIX_UNARY_EXPR for the prefix operators with medium precedence
 // then POSTFIX_UNARY_EXPR for the postfix operators with high precedence

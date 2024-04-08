@@ -178,7 +178,6 @@ pub enum Expression {
     },
     Loop(Block),
     Block(Block),
-    Return(Option<Box<Expression>>),
     Match {
         scrutinee: Box<Expression>,
         arms: Vec<MatchArm>,
@@ -191,6 +190,12 @@ pub enum Expression {
     Call {
         function: Box<Expression>,
         args: Vec<Expression>,
+    },
+    Break {
+        value: Option<Box<Expression>>,
+    },
+    Return {
+        value: Option<Box<Expression>>,
     },
 }
 

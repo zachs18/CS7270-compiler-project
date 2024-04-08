@@ -549,6 +549,16 @@ fn fixup_binary_operators(
 }
 
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    alt((
+        preceded(parse_ident("break"), opt(parse_no_block_expression))
+            .map(|expr| Expression::Break { value: expr.map(Box::new) }),
+        preceded(parse_ident("return"), opt(parse_no_block_expression))
+            .map(|expr| Expression::Return { value: expr.map(Box::new) }),
+        parse_operator_expression,
+    ))(input)
+}
+
+fn parse_operator_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, (mut operands, operators)) = fold_many0(
         tuple((parse_cast_expression, parse_binop)),
         || (vec![], vec![]),
