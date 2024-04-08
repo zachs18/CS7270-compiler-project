@@ -15,7 +15,7 @@ use zachs18_stdx::OptionExt;
 use crate::{
     ast::{
         ArithmeticOp, Associativity, BinaryOp, Block, ComparisonOp, Expression,
-        FnArg, FnItem, Item, MatchArm, Pattern, Statement, StaticItem, Type,
+        FnItem, FnParam, Item, MatchArm, Pattern, Statement, StaticItem, Type,
         UnaryOp,
     },
     lexer::{self, is_keyword},
@@ -158,6 +158,12 @@ fn parse_items_full(input: &[TokenTree]) -> IResult<'_, Vec<Item>> {
     all_consuming(many0(parse_item))(input)
 }
 
+/// A [fn item](parse_fn_item) or a [static item](parse_static_item).
+///
+/// ```text
+/// | FN_ITEM
+/// | STATIC_ITEM
+/// ```
 fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
     nom::branch::alt((
         parse_fn_item.map(Item::FnItem),
@@ -189,11 +195,11 @@ fn parse_group<
     }
 }
 
-/// ```ignore
+/// A function item.
+///
+/// ```text
 /// 'extern'? 'fn' ident '(' list[TYPED_PATTERN] ')' ( BLOCK | ';' )
 /// ```
-///
-/// A function item.
 ///
 /// If `extern` is not present, then `BLOCK` must be present, and this defines
 /// an internal, non-exported function.
@@ -206,7 +212,7 @@ fn parse_group<
 ///
 /// Examples:
 ///
-/// ```ignore
+/// ```text
 /// extern fn memcpy(dst: *mut void, src: *const void, n: usize) -> *mut void;
 /// extern fn main(argc: i32, argv: *mut *mut i8) -> i32 {
 ///     let x = 4 + 3;
@@ -221,7 +227,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
     let (input, fn_token) = parse_ident("fn")(input)?;
     let rest = move |input| {
         let (input, name) = parse_non_kw_ident(input)?;
-        let (input, args) = parse_fn_args(input)?;
+        let (input, args) = parse_fn_params(input)?;
         let (input, return_type) =
             opt(preceded(parse_joint_puncts("->"), parse_type))(input)?;
         if let Ok((input, ())) = parse_joint_puncts(";")(input) {
@@ -263,24 +269,44 @@ fn atom_expr() {
     assert!(parse_block(&tokens).is_ok());
 }
 
+/// A block containing [statements](parse_statement) and an optional trailing
+/// [expression](parse_expression).
+///
+/// ```text
+/// '{' STATEMENT* EXPRESSION? '}'
+/// ```
 fn parse_block(input: &[TokenTree]) -> IResult<'_, Block> {
-    let inner = pair(parse_statements, opt(parse_expression.map(Box::new)));
-    parse_group(Delimiter::Brace, inner)
-        .map(|(statements, expr)| Block { statements, tail: expr })
-        .parse(input)
+    let inner =
+        pair(many0(parse_statement), opt(parse_expression.map(Box::new)))
+            .map(|(statements, expr)| Block { statements, tail: expr });
+    parse_group(Delimiter::Brace, inner)(input)
 }
 
-fn parse_statements(input: &[TokenTree]) -> IResult<'_, Vec<Statement>> {
-    many0(parse_statement)(input)
-}
-
+/// A statment is either an [expression statement](parse_expression_statement).
+/// or a [`let` statement](parse_let_statement).
+///
+/// ```text
+/// | EXPRESSION_STATEMENT
+/// | LET_STATEMENT
+/// ```
 fn parse_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
+    alt((parse_expression_statement, parse_let_statement))(input)
+}
+
+/// An expression statement is either a [non-block
+/// expression](parse_no_block_expression) followed by a semicolon, or a [block
+/// expression](parse_block_expression) optionally followed by a semicolon.
+///
+/// ```text
+/// | NO_BLOCK_EXPRESSION ';'
+/// | BLOCK_EXPRESSION ';'?
+/// ```
+fn parse_expression_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
     alt((
         terminated(parse_no_block_expression, parse_joint_puncts(";"))
             .map(|expr| Statement::Expression(expr)),
         terminated(parse_block_expression, opt(parse_joint_puncts(";")))
             .map(|expr| Statement::Expression(expr)),
-        parse_let_statement,
     ))(input)
 }
 
@@ -304,6 +330,12 @@ fn parse_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((parse_block_expression, parse_no_block_expression))(input)
 }
 
+/// An expression that is a block.
+///
+/// Can be a [(normal) block](parse_block), an [if
+/// expression](parse_if_expression), a [loop
+/// expression](parse_loop_expression), or a [match
+/// expression](parse_match_expression).
 fn parse_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((
         parse_block.map(Expression::Block),
@@ -313,6 +345,13 @@ fn parse_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     ))(input)
 }
 
+/// An `if` expression.
+///
+/// ```text
+/// 'if' EXPR_NO_BLOCK BLOCK ( 'else' 'if' EXPR_NO_BLOCK BLOCK )* ('else' BLOCK)?
+/// ```
+///
+/// TODO: docs
 fn parse_if_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, _if) = parse_ident("if")(input)?;
     let (input, condition) = parse_no_block_expression(input)?;
@@ -340,6 +379,9 @@ fn parse_if_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     Ok((input, Expression::If { conditions, blocks }))
 }
 
+/// A `match` expression.
+///
+/// TODO: docs
 fn parse_match_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, _match) = parse_ident("match")(input)?;
     let (input, scrutinee) = parse_no_block_expression(input)?;
@@ -348,26 +390,35 @@ fn parse_match_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     Ok((input, Expression::Match { scrutinee: Box::new(scrutinee), arms }))
 }
 
+/// An arm of a [`match` expression](parse_match_expression).
+///
+/// TODO: docs
 fn parse_match_arm(input: &[TokenTree]) -> IResult<'_, MatchArm> {
     tuple((parse_pattern_with_alt, parse_joint_puncts("=>"), parse_expression))
         .map(|(pattern, _, expression)| MatchArm { pattern, expression })
         .parse(input)
 }
 
+/// A loop expression.
+///
+/// Can be a [while loop](parse_while_loop), a [for loop](parse_for_loop), or an
+/// [infinite loop](parse_loop_loop).
 fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((parse_while_loop, parse_for_loop, parse_loop_loop))(input)
 }
 
-/// ```ignore
+/// A while loop.
+///
+/// ```text
 /// 'while' EXPR_NO_BLOCK BLOCK
 /// ```
 ///
-/// A while loop. The condition must be of type `bool`, and the block must
+/// The condition must be of type `bool`, and the block must
 /// evaluate to `()`.
 ///
 /// # Examples:
 ///
-/// ```ignore
+/// ```text
 /// while true {}
 /// while i < 42 { i += 1; }
 /// ```
@@ -384,11 +435,13 @@ fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
     cut(tail)(input)
 }
 
-/// ```ignore
+/// A for loop.
+///
+/// ```text
 /// 'for' PATTERN 'in' EXPR_NO_BLOCK BLOCK
 /// ```
 ///
-/// A for loop. The pattern must be infallible and of the same type as the
+/// The pattern must be infallible and of the same type as the
 /// iterable's element, and the block must evaluate to `()`.
 ///
 /// The iterable must be a range expression, i.e. `a..b` or `a..=b` for some
@@ -396,7 +449,7 @@ fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
 ///
 /// # Examples:
 ///
-/// ```ignore
+/// ```text
 /// for i in 0..10 {}
 /// ```
 fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
@@ -417,15 +470,17 @@ fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
     cut(tail)(input)
 }
 
-/// ```ignore
+/// An infinite loop.
+///
+/// ```text
 /// 'loop' BLOCK
 /// ```
 ///
-/// An infinite loop. The block must evaluate to `()`.
+/// The block must evaluate to `()`.
 ///
 /// # Examples:
 ///
-/// ```ignore
+/// ```text
 /// loop {}
 /// loop {
 ///     if i == 42 { break; } // TODO: break expressions
@@ -555,6 +610,9 @@ fn fixup_binary_operators(
     }
 }
 
+/// A expression that is not a block.
+///
+/// TODO: docs
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((
         preceded(parse_ident("break"), opt(parse_no_block_expression))
@@ -565,6 +623,9 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     ))(input)
 }
 
+/// An expression containing unary and binary operators.
+///
+/// TODO: docs
 fn parse_operator_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, (mut operands, operators)) = fold_many0(
         tuple((parse_cast_expression, parse_binop)),
@@ -584,15 +645,15 @@ fn parse_operator_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     }
 }
 
-/// ```ignore
+/// A type-cast expression.
+///
+/// ```text
 /// PREFIX_UNARY_EXPR ( 'as' TYPE )*
 /// ```
 ///
-/// A type-cast expression.
-///
 /// Examples:
 ///
-/// ```ignore
+/// ```text
 /// 42 as u8
 /// 42 as *mut u8
 /// &X as usize
@@ -609,7 +670,10 @@ fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     Ok((input, expr))
 }
 
-/// ```ignore
+/// An expression containing no top-level binary operators (there can be
+/// binary operators in parentheses, arrays, function call arguments, etc).
+///
+/// ```text
 /// | '-' PREFIX_UNARY_EXPR
 /// | '!' PREFIX_UNARY_EXPR
 /// | '*' PREFIX_UNARY_EXPR
@@ -617,12 +681,9 @@ fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// | POSTFIX_UNARY_EXPR
 /// ```
 ///
-/// An expression containing no top-level binary operators (there can be
-/// binary operators in parentheses, arrays, function call arguments, etc).
-///
 /// Examples:
 ///
-/// ```ignore
+/// ```text
 /// 42
 /// &hello
 /// (43 + 7)
@@ -658,7 +719,11 @@ fn parse_prefix_unary_expression(
     ))(input)
 }
 
-/// ```ignore
+/// An expression containing no top-level binary operators, prefix unary
+/// operators, or type casts (there can be such operators in parentheses,
+/// arrays, function call arguments, etc).
+///
+/// ```text
 /// | integer
 /// | ident
 /// | 'true'
@@ -670,13 +735,9 @@ fn parse_prefix_unary_expression(
 /// | POSTFIX_UNARY_EXPR '(' list[EXPRESSION] ')'
 /// ```
 ///
-/// An expression containing no top-level binary operators, prefix unary
-/// operators, or type casts (there can be such operators in parentheses,
-/// arrays, function call arguments, etc).
-///
 /// Examples:
 ///
-/// ```ignore
+/// ```text
 /// 42
 /// hello
 /// (43 + 7)
@@ -799,20 +860,25 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
     .or_expected("a binary operator");
 }
 
-/// ```ignore
+/// A [`fn` parameter](parse_fn_param) list.
+///
+/// ```text
 /// '(' list[TYPED_PATTERN] ')'
 /// ```
-fn parse_fn_args(input: &[TokenTree]) -> IResult<'_, Vec<FnArg>> {
-    let inner = comma_separated_list(parse_fn_arg);
+fn parse_fn_params(input: &[TokenTree]) -> IResult<'_, Vec<FnParam>> {
+    let inner = comma_separated_list(parse_fn_param);
     parse_group(Delimiter::Parenthesis, inner)(input)
 }
 
-/// ```ignore
+/// A parameter argument in a `fn` item: a [pattern](parse_pattern) followed by
+/// a colon and a [type](parse_type).
+///
+/// ```text
 /// PATTERN ':' TYPE
 /// ```
-fn parse_fn_arg(input: &[TokenTree]) -> IResult<'_, FnArg> {
+fn parse_fn_param(input: &[TokenTree]) -> IResult<'_, FnParam> {
     tuple((parse_pattern, parse_joint_puncts(":"), parse_type))
-        .map(|(pattern, _, type_)| FnArg { pattern, type_ })
+        .map(|(pattern, _, type_)| FnParam { pattern, type_ })
         .parse(input)
 }
 
@@ -901,16 +967,20 @@ fn parse_pointer_mutability(input: &[TokenTree]) -> IResult<'_, bool> {
     })(input)
 }
 
-/// ```ignore
+/// A type.
+///
+/// ```text
 /// | ident
+/// | '!'
 /// | '[' TYPE (';' integer)? ']'
 /// | '(' list[TYPE] ')'
 /// | '*' ('const' | 'mut') TYPE
 /// ```
 ///
-/// A type. Can be:
+/// Can be:
 ///
 /// * a named type
+/// * the never type (`!`)
 /// * an array or slice type
 /// * a tuple type or a parenthesized type
 /// * a pointer type
@@ -955,11 +1025,11 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
     ))(input)
 }
 
-/// ```ignore
+/// A static item.
+///
+/// ```text
 /// 'extern'? 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
 /// ```
-///
-/// A static item.
 ///
 /// If `mut` is present, the item is mutable. If `mut` is not present, the item
 /// is not mutable (including by external code!).
@@ -975,14 +1045,10 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
 ///
 /// Examples:
 ///
-/// ```ignore
-/// extern fn memcpy(dst: *mut void, src: *const void, n: usize) -> *mut void;
-/// extern fn main(argc: i32, argv: *mut *mut i8) -> i32 {
-///     let x = 4 + 3;
-/// }
-/// fn foobar(x: *mut [u32; 10]) {
-///     x[4] = 3;
-/// }
+/// ```text
+/// extern static mut errno: i32;
+/// extern static MY_VAR: u64 = 42;
+/// static mut COUNTER: u64 = 0;
 /// ```
 fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     let (input, extern_token) = opt(parse_ident("static"))(input)?;
@@ -1006,7 +1072,9 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     ))
 }
 
-/// ```ignore
+/// A pattern, as used in `let` bindings, `fn` arguments, and `match` arms.
+///
+/// ```text
 /// | '_'
 /// | 'mut' ident
 /// | ident
@@ -1044,7 +1112,9 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
     ))(input)
 }
 
-/// ```ignore
+/// A pattern that matches if any of its alternatives match.
+///
+/// ```text
 /// '|'? PATTERN ('|' PATTERN)*
 /// // equivalently
 /// '|'? (PATTERN '|')* PATTERN
@@ -1076,13 +1146,13 @@ fn test_comma_separated() {
     }
     for src in ["", "x: u32", "x: *mut u32,", "x: *mut u32, y: u64"] {
         let tokens = crate::lexer::lex(src.as_bytes());
-        let res = comma_separated_list(parse_fn_arg)(&tokens).finish();
+        let res = comma_separated_list(parse_fn_param)(&tokens).finish();
         let (tokens, _) = res.unwrap();
         assert!(tokens.is_empty(), "{src:?}: {tokens:?}");
     }
     for src in ["()", "(x: u32)", "(x: *mut u32,)", "(x: *mut u32, y: u64)"] {
         let tokens = crate::lexer::lex(src.as_bytes());
-        let res = parse_fn_args(&tokens).finish();
+        let res = parse_fn_params(&tokens).finish();
         let (tokens, _) = res.unwrap();
         assert!(tokens.is_empty(), "{src:?}: {tokens:?}");
     }

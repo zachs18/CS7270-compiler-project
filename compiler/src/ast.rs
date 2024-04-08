@@ -11,7 +11,7 @@ pub struct FnItem {
     pub extern_token: Option<()>,
     pub fn_token: (),
     pub name: Ident,
-    pub args: Vec<FnArg>,
+    pub args: Vec<FnParam>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,
 }
@@ -27,7 +27,7 @@ pub struct StaticItem {
 }
 
 #[derive(Debug)]
-pub struct FnArg {
+pub struct FnParam {
     pub pattern: Pattern,
     pub type_: Type,
 }
