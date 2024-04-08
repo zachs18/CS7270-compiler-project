@@ -391,6 +391,9 @@ fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// A for loop. The pattern must be infallible and of the same type as the
 /// iterable's element, and the block must evaluate to `()`.
 ///
+/// The iterable must be a range expression, i.e. `a..b` or `a..=b` for some
+/// `a`, `b`.
+///
 /// # Examples:
 ///
 /// ```ignore
@@ -404,7 +407,11 @@ fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
         parse_no_block_expression,
         parse_block,
     ))
-    .map(|(pattern, _, iterable, body)| todo!("for loop"));
+    .map(|(pattern, _, iterable, body)| Expression::For {
+        pattern,
+        iterable: Box::new(iterable),
+        body: Box::new(Expression::Block(body)),
+    });
     // Cut because we already saw a `for` token, so we know this is a for
     // loop.
     cut(tail)(input)

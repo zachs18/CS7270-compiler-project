@@ -48,3 +48,16 @@ fn main() -> ExitCode {
 
     ExitCode::SUCCESS
 }
+
+#[test]
+fn test_inputs() {
+    for source in [
+        include_str!("../../input/fibonacci.src"),
+        include_str!("../../input/bubblesort.src"),
+        include_str!("../../input/collatz.src"),
+        include_str!("../../input/patterns.src"),
+    ] {
+        let tokens = lexer::lex(source.as_bytes());
+        let ast = parser::parse(&tokens);
+    }
+}

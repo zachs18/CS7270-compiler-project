@@ -177,6 +177,11 @@ pub enum Expression {
         condition: Box<Expression>,
         body: Block,
     },
+    For {
+        pattern: Pattern,
+        iterable: Box<Expression>,
+        body: Box<Expression>,
+    },
     Loop(Block),
     Block(Block),
     Match {
