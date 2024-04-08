@@ -72,9 +72,21 @@ COMPARISON_BINOP: '==' | '<=' | '>=' | '!=' | '<' | '>'
 ASSIGN_BINOP: '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&&=' | '||=' | '&=' | '|=' | '^=' | '>>=' | '<<='
 RANGE_BINOP: '..' | '..='
 
-// a single "thing" including unary prefix and suffix operators
-// Note: operator precedence is handled later (not in the syntax itself)
-UNARY_EXPR:
+// Separate the unary operators by precedence:
+// CAST_EXPR because `as` casts bind loosest (lowest precedence)
+// then PREFIX_UNARY_EXPR for the prefix operators with medium precedence
+// then POSTFIX_UNARY_EXPR for the postfix operators with high precedence
+
+CAST_EXPR: PREFIX_UNARY_EXPR ( 'as' TYPE )*
+
+PREFIX_UNARY_EXPR:
+ | '-' PREFIX_UNARY_EXPR
+ | '!' PREFIX_UNARY_EXPR
+ | '*' PREFIX_UNARY_EXPR
+ | '&' 'mut'? PREFIX_UNARY_EXPR
+ | POSTFIX_UNARY_EXPR
+
+POSTFIX_UNARY_EXPR:
  | integer
  | ident
  | 'true'
@@ -82,12 +94,5 @@ UNARY_EXPR:
  | '_'
  | '(' list[EXPRESSION] ')'
  | '[' list[EXPRESSION] ']'
- | '-' UNARY_EXPR
- | '!' UNARY_EXPR
- | '*' UNARY_EXPR
- | '&' UNARY_EXPR
- | UNARY_EXPR '[' EXPRESSION ']'
- | UNARY_EXPR '(' list[EXPRESSION] ')'
-
-// Separate from UNARY_EXPR since `x as u64[42]` doesn't make sense
-CAST_EXPR: UNARY_EXPR ( 'as' TYPE )*
+ | POSTFIX_UNARY_EXPR '[' EXPRESSION ']'
+ | POSTFIX_UNARY_EXPR '(' list[EXPRESSION] ')'

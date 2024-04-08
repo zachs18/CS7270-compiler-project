@@ -32,7 +32,7 @@ pub struct FnArg {
     pub type_: Type,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Type {
     Pointer { mutable: bool, pointee: Box<Type> },
     Array { element: Box<Type>, length: u128 },
@@ -51,14 +51,15 @@ pub enum Pattern {
     Tuple(Vec<Self>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum UnaryOp {
     Return,
     Break,
     Not,
     Neg,
-    AddrOf,
+    AddrOf { mutable: bool },
     Deref,
+    AsCast { to_type: Type },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,12 +155,10 @@ pub enum Expression {
     Bool(bool),
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),
-    Deref(Box<Expression>),
-    AddrOf(Box<Expression>),
-    Parenthesized(Box<Expression>),
-    /// TODO: remove this
-    Neg(Box<Expression>),
-    Not(Box<Expression>),
+    UnaryOp {
+        op: UnaryOp,
+        operand: Box<Expression>,
+    },
     BinaryOp {
         lhs: Box<Expression>,
         op: BinaryOp,
@@ -185,6 +184,14 @@ pub enum Expression {
         arms: Vec<MatchArm>,
     },
     Wildcard,
+    Index {
+        base: Box<Expression>,
+        index: Box<Expression>,
+    },
+    Call {
+        function: Box<Expression>,
+        args: Vec<Expression>,
+    },
 }
 
 #[derive(Debug)]

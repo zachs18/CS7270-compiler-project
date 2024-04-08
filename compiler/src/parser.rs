@@ -16,6 +16,7 @@ use crate::{
     ast::{
         ArithmeticOp, Associativity, BinaryOp, Block, ComparisonOp, Expression,
         FnArg, FnItem, Item, MatchArm, Pattern, Statement, StaticItem, Type,
+        UnaryOp,
     },
     lexer::{self, is_keyword},
     token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
@@ -567,17 +568,36 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 }
 
 /// ```ignore
-///  | integer
-///  | ident
-///  | '_'
-///  | '(' list[EXPRESSION] ')'
-///  | '[' list[EXPRESSION] ']'
-///  | '-' UNARY_EXPR
-///  | '!' UNARY_EXPR
-///  | '*' UNARY_EXPR
-///  | '&' UNARY_EXPR
-///  | UNARY_EXPR '[' EXPRESSION ']'
-///  | UNARY_EXPR '(' list[EXPRESSION] ')'
+/// PREFIX_UNARY_EXPR ( 'as' TYPE )*
+/// ```
+///
+/// A type-cast expression.
+///
+/// Examples:
+///
+/// ```ignore
+/// 42 as u8
+/// 42 as *mut u8
+/// &X as usize
+/// ```
+fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, mut expr) = parse_prefix_unary_expression(input)?;
+    let (input, tails) = many0(preceded(parse_ident("as"), parse_type))(input)?;
+    for to_type in tails {
+        expr = Expression::UnaryOp {
+            op: UnaryOp::AsCast { to_type },
+            operand: Box::new(expr),
+        };
+    }
+    Ok((input, expr))
+}
+
+/// ```ignore
+/// | '-' PREFIX_UNARY_EXPR
+/// | '!' PREFIX_UNARY_EXPR
+/// | '*' PREFIX_UNARY_EXPR
+/// | '&' PREFIX_UNARY_EXPR
+/// | POSTFIX_UNARY_EXPR
 /// ```
 ///
 /// An expression containing no top-level binary operators (there can be
@@ -593,8 +613,64 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// !my_function(X, 42)
 /// &(*get_ptr(42))[3]
 /// ```
-fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
-    let (input, unary_expression) = alt((
+fn parse_prefix_unary_expression(
+    input: &[TokenTree],
+) -> IResult<'_, Expression> {
+    let prefix_unary_op = |op: &'static str, unary_op: UnaryOp| {
+        preceded(parse_joint_puncts(op), parse_prefix_unary_expression).map(
+            move |operand| Expression::UnaryOp {
+                op: unary_op.clone(),
+                operand: Box::new(operand),
+            },
+        )
+    };
+
+    alt((
+        parse_postfix_unary_expression,
+        prefix_unary_op("-", UnaryOp::Neg),
+        prefix_unary_op("!", UnaryOp::Not),
+        prefix_unary_op("*", UnaryOp::Deref),
+        pair(
+            preceded(parse_joint_puncts("&"), opt(parse_ident("mut"))),
+            parse_prefix_unary_expression,
+        )
+        .map(|(mutable, operand)| Expression::UnaryOp {
+            op: UnaryOp::AddrOf { mutable: mutable.is_some() },
+            operand: Box::new(operand),
+        }),
+    ))(input)
+}
+
+/// ```ignore
+/// | integer
+/// | ident
+/// | 'true'
+/// | 'false'
+/// | '_'
+/// | '(' list[EXPRESSION] ')'
+/// | '[' list[EXPRESSION] ']'
+/// | POSTFIX_UNARY_EXPR '[' EXPRESSION ']'
+/// | POSTFIX_UNARY_EXPR '(' list[EXPRESSION] ')'
+/// ```
+///
+/// An expression containing no top-level binary operators, prefix unary
+/// operators, or type casts (there can be such operators in parentheses,
+/// arrays, function call arguments, etc).
+///
+/// Examples:
+///
+/// ```ignore
+/// 42
+/// hello
+/// (43 + 7)
+/// my_function(42, 7 + 3)
+/// my_function(X, 42)
+/// (*get_ptr(42))[3]
+/// ```
+fn parse_postfix_unary_expression(
+    input: &[TokenTree],
+) -> IResult<'_, Expression> {
+    let (input, mut expr) = alt((
         parse_integer.map(Expression::Integer),
         parse_non_kw_ident.map(Expression::Ident),
         parse_ident("_").map(|_| Expression::Wildcard),
@@ -608,14 +684,6 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
             Delimiter::Bracket,
             comma_separated_list(parse_expression).map(Expression::Array),
         ),
-        tuple((parse_joint_puncts("-"), parse_unary_expression))
-            .map(|(_, expr)| Expression::Neg(Box::new(expr))),
-        tuple((parse_joint_puncts("!"), parse_unary_expression))
-            .map(|(_, expr)| Expression::Not(Box::new(expr))),
-        tuple((parse_joint_puncts("*"), parse_unary_expression))
-            .map(|(_, expr)| Expression::Deref(Box::new(expr))),
-        tuple((parse_joint_puncts("&"), parse_unary_expression))
-            .map(|(_, expr)| Expression::AddrOf(Box::new(expr))),
     ))(input)?;
     let index = parse_group(Delimiter::Bracket, parse_expression);
     let call = parse_group(
@@ -623,46 +691,25 @@ fn parse_unary_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
         comma_separated_list(parse_expression),
     );
     let (input, tails) = many0(either(index, call))(input)?;
-    if tails.is_empty() {
-        // There were only prefix operators, don't need to do precedence stuff
-        Ok((input, unary_expression))
-    } else {
-        // Need to do precedence stuff
-        todo!()
+    for tail in tails {
+        expr = match tail {
+            Either::Left(index) => Expression::Index {
+                base: Box::new(expr),
+                index: Box::new(index),
+            },
+            Either::Right(args) => {
+                Expression::Call { function: Box::new(expr), args }
+            }
+        };
     }
-}
-
-/// ```ignore
-/// UNARY_EXPR ( 'as' TYPE )*
-/// ```
-///
-/// A type-cast expression.
-///
-/// Examples:
-///
-/// ```ignore
-/// 42 as u8
-/// 42 as *mut u8
-/// &X as usize
-/// ```
-fn parse_cast_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
-    let (input, unary_expression) = parse_unary_expression(input)?;
-    let (input, tails) = many0(preceded(parse_ident("as"), parse_type))(input)?;
-    if tails.is_empty() {
-        // There were no casts, don't need to do precedence stuff
-        Ok((input, unary_expression))
-    } else {
-        // Need to do precedence stuff
-        todo!()
-    }
+    Ok((input, expr))
 }
 
 #[test]
 fn test_unary_expressions() {
     use crate::lexer::lex;
-    let tokens = lex("!&*&!*&a".as_bytes());
-    let ast = parse_unary_expression(&tokens);
-    assert!(ast.is_ok());
+    let tokens = lex("!&*&!*&a[42](37) as u32".as_bytes());
+    let ast = all_consuming(parse_expression)(&tokens).finish().unwrap();
 }
 
 const fn sorted_by_length_decreasing<const N: usize, T: Copy>(
