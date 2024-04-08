@@ -1,4 +1,4 @@
-use std::{backtrace::Backtrace, fmt};
+use std::{backtrace::Backtrace, collections::VecDeque, fmt};
 
 use either::Either;
 use itertools::{Itertools, Position};
@@ -14,8 +14,8 @@ use zachs18_stdx::OptionExt;
 
 use crate::{
     ast::{
-        Block, Expression, FnArg, FnItem, Item, Pattern, Statement, StaticItem,
-        Type,
+        ArithmeticOp, Associativity, BinaryOp, Block, ComparisonOp, Expression,
+        FnArg, FnItem, Item, Pattern, Statement, StaticItem, Type,
     },
     lexer::{self, is_keyword},
     token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
@@ -424,6 +424,123 @@ fn parse_loop_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
     cut(tail)(input)
 }
 
+// TODO: use shunting-yard algorithm maybe?
+// This algorithm is not optimal, but the compiler doesn't need to be fast lol.
+// Also unless we observe a bottleneck of parsing long expressions, this should
+// be fine.
+/// Given an alternating sequence of operands and binary operators, use operator
+/// precedence and associativity to produce the resulting expression.
+///
+/// Currently implemented as:
+///
+/// 1. If there's only one operand, return it.
+/// 2. If there's only two operands, return the binary operator expression with
+///    them.
+/// 3. If there's more than two operands:
+///     1. Go through the list of operators and find the lowest-precedence ones
+///     2. Split the input into chunks between the lowest-precedence operators.
+///     3. Recursively fixup those chunks into single expressions.
+///     4. Reduce the fixed-up expressions into a single expression using the
+///        lowest-precedence operators, based on the associativity of the
+///        lowest-precedence operators.
+fn fixup_binary_operators(
+    mut operands: Vec<Expression>, mut operators: Vec<BinaryOp>,
+) -> Result<Expression, &'static str> {
+    match operands.len() {
+        0 => unreachable!(),
+        1 => Ok(operands.pop().unwrap()),
+        2 => {
+            let operands: [Expression; 2] = operands.try_into().unwrap();
+            let [lhs, rhs] = operands.map(Box::new);
+            Ok(Expression::BinaryOp { lhs, op: operators[0], rhs })
+        }
+        _ => {
+            let mut lowest_precedence = u8::MAX;
+            let mut associativity = Associativity::None;
+            let mut lowest_precedence_operator_indices = vec![];
+            for (i, op) in operators.iter().enumerate() {
+                let (precedence, assoc) = op.precedence_and_associativity();
+                if precedence == lowest_precedence {
+                    lowest_precedence_operator_indices.push(i);
+                    if assoc != associativity {
+                        return Err("operators with the same precedence but \
+                                    different associativities cannot be \
+                                    chained");
+                    }
+                } else if precedence < lowest_precedence {
+                    lowest_precedence = precedence;
+                    lowest_precedence_operator_indices.clear();
+                    lowest_precedence_operator_indices.push(i);
+                    associativity = assoc;
+                }
+            }
+            if associativity == Associativity::None
+                && lowest_precedence_operator_indices.len() > 1
+            {
+                return Err("operator cannot be chained");
+            }
+
+            let n = lowest_precedence_operator_indices.len();
+            // These are all stored in reverse order, since it's easier to take
+            // from the end of the vec since that doesn't affect indices.
+            let mut operand_chunks: Vec<Vec<Expression>> =
+                Vec::with_capacity(n + 1);
+            let mut operator_chunks: Vec<Vec<BinaryOp>> =
+                Vec::with_capacity(n + 1);
+            let mut lowest_precedence_operators: VecDeque<BinaryOp> =
+                VecDeque::with_capacity(n);
+            for &n in lowest_precedence_operator_indices.iter().rev() {
+                operand_chunks.push(operands.split_off(n + 1));
+                operator_chunks.push(operators.split_off(n + 1));
+                lowest_precedence_operators.push_back(operators.pop().unwrap());
+            }
+            operand_chunks.push(operands);
+            operator_chunks.push(operators);
+
+            let mut operators = lowest_precedence_operators;
+
+            // As above, these are in reverse order.
+            let mut operands = std::iter::zip(operand_chunks, operator_chunks)
+                .map(|(operands, operators)| {
+                    fixup_binary_operators(operands, operators)
+                })
+                .collect::<Result<VecDeque<_>, _>>()?;
+
+            // Because the above are in reverse order, left-associativity will
+            // take from the back, and right-associativity will take from the
+            // front
+            match associativity {
+                Associativity::Left | Associativity::None => {
+                    let mut expr = operands.pop_back().unwrap();
+                    while let Some(lhs) = operands.pop_back() {
+                        let op = operators.pop_back().unwrap();
+                        expr = Expression::BinaryOp {
+                            lhs: Box::new(lhs),
+                            op,
+                            rhs: Box::new(expr),
+                        };
+                    }
+                    debug_assert!(operators.is_empty());
+                    Ok(expr)
+                }
+                Associativity::Right => {
+                    let mut expr = operands.pop_front().unwrap();
+                    while let Some(rhs) = operands.pop_front() {
+                        let op = operators.pop_front().unwrap();
+                        expr = Expression::BinaryOp {
+                            lhs: Box::new(expr),
+                            op,
+                            rhs: Box::new(rhs),
+                        };
+                    }
+                    debug_assert!(operators.is_empty());
+                    Ok(expr)
+                }
+            }
+        }
+    }
+}
+
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     let (input, (mut operands, operators)) = fold_many0(
         tuple((parse_cast_expression, parse_binop)),
@@ -438,7 +555,8 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
         Ok((input, last_operand))
     } else {
         operands.push(last_operand);
-        Ok((input, Expression::BinOpChain { operands, operators }))
+        let expr = fixup_binary_operators(operands, operators).unwrap();
+        Ok((input, expr))
     }
 }
 
@@ -541,32 +659,65 @@ fn test_unary_expressions() {
     assert!(ast.is_ok());
 }
 
-const fn sorted_by_length_decreasing<const N: usize>(
-    mut strs: [&'static str; N],
-) -> [&'static str; N] {
+const fn sorted_by_length_decreasing<const N: usize, T: Copy>(
+    mut ops: [(&'static str, T); N],
+) -> [(&'static str, T); N] {
     let mut i = N;
     while i > 0 {
         let mut j = 0;
         while j < i - 1 {
-            if strs[j].len() < strs[j + 1].len() {
-                (strs[j], strs[j + 1]) = (strs[j + 1], strs[j]);
+            if ops[j].0.len() < ops[j + 1].0.len() {
+                (ops[j], ops[j + 1]) = (ops[j + 1], ops[j]);
             }
             j += 1;
         }
         i -= 1;
     }
-    strs
+    ops
 }
 
-fn parse_binop(input: &[TokenTree]) -> IResult<'_, &'static str> {
+fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
+    use ArithmeticOp as A;
+    use BinaryOp as B;
+    use ComparisonOp as C;
     // sorted longest first to avoid parsing ambiguity
-    static BINOPS: [&str; 33] = sorted_by_length_decreasing([
-        "+", "-", "*", "/", "%", "&&", "||", "&", "|", "^", ">>", "<<", "==",
-        "<=", ">=", "!=", "<", ">", "=", "+=", "-=", "*=", "/=", "%=", "&&=",
-        "||=", "&=", "|=", "^=", ">>=", "<<=", "..", "..=",
+    static BINOPS: [(&str, BinaryOp); 33] = sorted_by_length_decreasing([
+        ("+", B::Arithmetic(A::Add)),
+        ("-", B::Arithmetic(A::Subtract)),
+        ("*", B::Arithmetic(A::Multiply)),
+        ("/", B::Arithmetic(A::Divide)),
+        ("%", B::Arithmetic(A::Modulo)),
+        ("&&", B::Arithmetic(A::And)),
+        ("||", B::Arithmetic(A::Or)),
+        ("&", B::Arithmetic(A::BitAnd)),
+        ("|", B::Arithmetic(A::BitOr)),
+        ("^", B::Arithmetic(A::BitXor)),
+        (">>", B::Arithmetic(A::RightShift)),
+        ("<<", B::Arithmetic(A::LeftShift)),
+        ("==", B::Comparison(C::Equal)),
+        ("<=", B::Comparison(C::LessEq)),
+        (">=", B::Comparison(C::GreaterEq)),
+        ("!=", B::Comparison(C::NotEqual)),
+        ("<", B::Comparison(C::Less)),
+        (">", B::Comparison(C::Greater)),
+        ("=", B::Assignment { augment: None }),
+        ("+=", B::Assignment { augment: Some(A::Add) }),
+        ("-=", B::Assignment { augment: Some(A::Subtract) }),
+        ("*=", B::Assignment { augment: Some(A::Multiply) }),
+        ("/=", B::Assignment { augment: Some(A::Divide) }),
+        ("%=", B::Assignment { augment: Some(A::Modulo) }),
+        ("&&=", B::Assignment { augment: Some(A::And) }),
+        ("||=", B::Assignment { augment: Some(A::Or) }),
+        ("&=", B::Assignment { augment: Some(A::BitAnd) }),
+        ("|=", B::Assignment { augment: Some(A::BitOr) }),
+        ("^=", B::Assignment { augment: Some(A::BitXor) }),
+        (">>=", B::Assignment { augment: Some(A::RightShift) }),
+        ("<<=", B::Assignment { augment: Some(A::LeftShift) }),
+        ("..", B::RangeOp { end_inclusive: false }),
+        ("..=", B::RangeOp { end_inclusive: true }),
     ]);
-    for binop in BINOPS {
-        if let Ok((input, ())) = parse_joint_puncts(binop)(input) {
+    for (puncts, binop) in BINOPS {
+        if let Ok((input, ())) = parse_joint_puncts(puncts)(input) {
             return Ok((input, binop));
         }
     }

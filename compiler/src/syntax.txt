@@ -37,6 +37,8 @@ LET_STATEMENT: 'let' PATTERN ( ':' TYPE )? ( '=' EXPRESSION )? ';'
 EXPRESSION: EXPR_BLOCK | EXPR_NO_BLOCK
 
 EXPR_NO_BLOCK:
+ | `break` EXPR_NO_BLOCK
+ | `return` EXPR_NO_BLOCK
  | OPERATOR_EXPRESSION
 // TODO: other expressions
 

@@ -47,6 +47,102 @@ pub enum Pattern {
     Ident { mutable: bool, ident: Ident },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Return,
+    Break,
+    Not,
+    Neg,
+    AddrOf,
+    Deref,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    BitAnd,
+    BitOr,
+    BitXor,
+    And,
+    Or,
+    LeftShift,
+    RightShift,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparisonOp {
+    Equal,
+    NotEqual,
+    Less,
+    Greater,
+    LessEq,
+    GreaterEq,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Arithmetic(ArithmeticOp),
+    Assignment { augment: Option<ArithmeticOp> },
+    Comparison(ComparisonOp),
+    RangeOp { end_inclusive: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Associativity {
+    /// Left-associative, e.g. `x - y - z` is equivalent to `(x - y) - z`.
+    ///
+    /// Left-associative operators with the same precedence can be mixed
+    /// without parentheses, e.g. `x + y - z + w` is equivalent to `((x + y) -
+    /// z) + w`
+    Left,
+    /// Right-associative, e.g. `x - y - z` is equivalent to `x - (y - z)`.
+    ///
+    /// Right-associative operators with the same precedence can be mixed
+    /// without parentheses.
+    Right,
+    /// Non-associative, e.g. `x == y == z` is not allowed.
+    None,
+}
+
+impl BinaryOp {
+    pub fn precedence_and_associativity(&self) -> (u8, Associativity) {
+        use ArithmeticOp as A;
+        use BinaryOp as B;
+        match self {
+            // Assignment operators have the lowest precedence, and cannot be
+            // chained.
+            B::Assignment { .. } => (0, Associativity::None),
+            // Range operators have the lowest precedence other than assignment,
+            // and cannot be chained.
+            B::RangeOp { .. } => (1, Associativity::None),
+            // Boolean or has lower precedence than boolean and, e.g. `a && b ||
+            // c` parses as `(a && b) || c`.
+            B::Arithmetic(A::Or) => (2, Associativity::Right),
+            B::Arithmetic(A::And) => (3, Associativity::Right),
+            // Comparison operators have lower precedence than boolean
+            // operators, and cannot be chained. e.g. `x == y && a < b` parses
+            // as `(x == y) && (a < b)`.
+            B::Comparison(..) => (4, Associativity::None),
+            // The rest of these are mostly copied from Rust, with some
+            // restrictions (like making shift operators non-associative).
+            B::Arithmetic(A::BitOr) => (5, Associativity::Left),
+            B::Arithmetic(A::BitXor) => (6, Associativity::Left),
+            B::Arithmetic(A::BitAnd) => (7, Associativity::Left),
+            B::Arithmetic(A::LeftShift | A::RightShift) => {
+                (8, Associativity::None)
+            }
+            B::Arithmetic(A::Add | A::Subtract) => (9, Associativity::Left),
+            B::Arithmetic(A::Multiply | A::Divide | A::Modulo) => {
+                (10, Associativity::Left)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Expression {
     Ident(Ident),
@@ -58,25 +154,13 @@ pub enum Expression {
     AddrOf(Box<Expression>),
     Parenthesized(Box<Expression>),
     /// TODO: remove this
-    BinOpChain {
-        operands: Vec<Expression>,
-        operators: Vec<&'static str>,
-    },
     Neg(Box<Expression>),
     Not(Box<Expression>),
-    Add(Box<Expression>, Box<Expression>),
-    Sub(Box<Expression>, Box<Expression>),
-    Mul(Box<Expression>, Box<Expression>),
-    Div(Box<Expression>, Box<Expression>),
-    Mod(Box<Expression>, Box<Expression>),
-    BoolAnd(Box<Expression>, Box<Expression>),
-    BoolOr(Box<Expression>, Box<Expression>),
-    BitAnd(Box<Expression>, Box<Expression>),
-    BitOr(Box<Expression>, Box<Expression>),
-    BitXor(Box<Expression>, Box<Expression>),
-    LeftShift(Box<Expression>, Box<Expression>),
-    RightShift(Box<Expression>, Box<Expression>),
-    Assign(Box<Expression>, Box<Expression>),
+    BinaryOp {
+        lhs: Box<Expression>,
+        op: BinaryOp,
+        rhs: Box<Expression>,
+    },
     /// `if cond1 { block1 } else if cond2 { block2 } else { block3 }`
     ///
     /// `conditions.len()` is always `>= 1`, and is always equal to or one less
