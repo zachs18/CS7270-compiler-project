@@ -55,8 +55,6 @@ pub enum Pattern {
 
 #[derive(Debug, Clone)]
 pub enum UnaryOp {
-    Return,
-    Break,
     Not,
     Neg,
     AddrOf { mutable: bool },
@@ -212,6 +210,27 @@ pub struct Block {
     pub tail: Option<Box<Expression>>,
 }
 
+impl Block {
+    /// Get a reference to the tail expression of this block. Note that the
+    /// `tail` field is only set if there is a syntactic tail-expression, i.e. a
+    /// non-block expression. This method will return the last statement if
+    /// it is an expression-statement without a semicolon and there is no
+    /// syntactic tail-expression.
+    pub fn tail(&self) -> Option<&Expression> {
+        match (&self.tail, self.statements.last()) {
+            (Some(expression), _) => Some(expression),
+            (
+                None,
+                Some(Statement::Expression {
+                    expression,
+                    has_semicolon: false,
+                }),
+            ) => Some(expression),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Statement {
     LetStatement {
@@ -219,7 +238,10 @@ pub enum Statement {
         type_: Option<Type>,
         initializer: Option<Expression>,
     },
-    Expression(Expression),
+    Expression {
+        expression: Expression,
+        has_semicolon: bool,
+    },
 }
 
 #[derive(Debug)]

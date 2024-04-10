@@ -276,9 +276,11 @@ fn atom_expr() {
 /// '{' STATEMENT* EXPRESSION? '}'
 /// ```
 fn parse_block(input: &[TokenTree]) -> IResult<'_, Block> {
-    let inner =
-        pair(many0(parse_statement), opt(parse_expression.map(Box::new)))
-            .map(|(statements, expr)| Block { statements, tail: expr });
+    let inner = pair(
+        many0(parse_statement),
+        opt(parse_no_block_expression.map(Box::new)),
+    )
+    .map(|(statements, expr)| Block { statements, tail: expr });
     parse_group(Delimiter::Brace, inner)(input)
 }
 
@@ -303,10 +305,18 @@ fn parse_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
 /// ```
 fn parse_expression_statement(input: &[TokenTree]) -> IResult<'_, Statement> {
     alt((
-        terminated(parse_no_block_expression, parse_joint_puncts(";"))
-            .map(|expr| Statement::Expression(expr)),
-        terminated(parse_block_expression, opt(parse_joint_puncts(";")))
-            .map(|expr| Statement::Expression(expr)),
+        terminated(parse_no_block_expression, parse_joint_puncts(";")).map(
+            |expression| Statement::Expression {
+                expression,
+                has_semicolon: true,
+            },
+        ),
+        pair(parse_block_expression, opt(parse_joint_puncts(";"))).map(
+            |(expression, semi)| Statement::Expression {
+                expression,
+                has_semicolon: semi.is_some(),
+            },
+        ),
     ))(input)
 }
 
