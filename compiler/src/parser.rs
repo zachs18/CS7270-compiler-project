@@ -1071,6 +1071,14 @@ fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
     ))
 }
 
+/// `..` (false) or `..=` (true). Returns whether the range op is an inclusive
+/// range op.
+fn parse_range_op(input: &[TokenTree]) -> IResult<'_, bool> {
+    either(parse_joint_puncts("..="), parse_joint_puncts(".."))
+        .map(|either| either.is_left())
+        .parse(input)
+}
+
 /// A pattern, as used in `let` bindings, `fn` arguments, and `match` arms.
 ///
 /// ```text
@@ -1088,7 +1096,15 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
     let ident_pattern = pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
         |(mutable, ident)| Pattern::Ident { mutable: mutable.is_some(), ident },
     );
-    let integer_pattern = parse_integer.map(Pattern::Integer);
+    let integer_or_range_pattern =
+        tuple((parse_integer, opt(pair(parse_range_op, parse_integer)))).map(
+            |(first, tail)| match tail {
+                None => Pattern::Integer(first),
+                Some((inclusive, second)) => {
+                    Pattern::Range { start: first, inclusive, end: second }
+                }
+            },
+        );
     let array_pattern = parse_group(
         Delimiter::Bracket,
         comma_separated_list(parse_pattern_with_alt),
@@ -1105,7 +1121,7 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
     alt((
         wildcard_pattern,
         ident_pattern,
-        integer_pattern,
+        integer_or_range_pattern,
         array_pattern,
         tuple_or_parenthesized_pattern,
     ))(input)

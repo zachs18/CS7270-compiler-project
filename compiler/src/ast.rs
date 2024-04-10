@@ -50,6 +50,7 @@ pub enum Pattern {
     Alt(Vec<Self>),
     Array(Vec<Self>),
     Tuple(Vec<Self>),
+    Range { start: Integer, inclusive: bool, end: Integer },
 }
 
 #[derive(Debug, Clone)]

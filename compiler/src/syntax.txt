@@ -15,6 +15,7 @@ PATTERN:
  | '_'
  | ident
  | 'mut' ident
+ | integer ( '..' | '..=' ) integer
  | integer
  | '(' list[PATTERN_WITH_ALT] ')'
  | '[' list[PATTERN_WITH_ALT] ']'
