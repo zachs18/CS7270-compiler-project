@@ -787,7 +787,7 @@ fn parse_postfix_unary_expression(
 fn test_unary_expressions() {
     use crate::lexer::lex;
     let tokens = lex("!&*&!*&a[42](37) as u32".as_bytes());
-    let ast = all_consuming(parse_expression)(&tokens).finish().unwrap();
+    let _ast = all_consuming(parse_expression)(&tokens).finish().unwrap();
 }
 
 const fn sorted_by_length_decreasing<const N: usize, T: Copy>(
@@ -903,12 +903,11 @@ fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, Ident> {
 /// Parse a specific identifier. May be a keyword.
 fn parse_ident<'expected>(
     expected: &'expected str,
-) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, ()> + 'expected {
+) -> impl for<'a> Fn(&'a [TokenTree]) -> IResult<'a, Ident> + 'expected {
     move |input| {
         nom::combinator::verify(parse_any_ident, |ident: &Ident| {
             ident.ident == expected
         })
-        .map(|_| ())
         .parse(input)
     }
 }

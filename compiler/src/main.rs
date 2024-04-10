@@ -58,6 +58,6 @@ fn test_inputs() {
         include_str!("../../input/patterns.src"),
     ] {
         let tokens = lexer::lex(source.as_bytes());
-        let ast = parser::parse(&tokens);
+        let _ast = parser::parse(&tokens);
     }
 }
