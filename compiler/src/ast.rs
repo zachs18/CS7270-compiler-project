@@ -40,6 +40,7 @@ pub enum Type {
     Slice { element: Box<Type> },
     Ident(Ident),
     Tuple(Vec<Type>),
+    Parenthesized(Box<Type>),
     Never,
 }
 
@@ -51,6 +52,7 @@ pub enum Pattern {
     Alt(Vec<Self>),
     Array(Vec<Self>),
     Tuple(Vec<Self>),
+    Parenthesized(Box<Pattern>),
     Range { start: Integer, inclusive: bool, end: Integer },
 }
 
@@ -156,6 +158,7 @@ pub enum Expression {
     Bool(bool),
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),
+    Parenthesized(Box<Expression>),
     UnaryOp {
         op: UnaryOp,
         operand: Box<Expression>,

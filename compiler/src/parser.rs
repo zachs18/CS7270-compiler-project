@@ -768,7 +768,11 @@ fn parse_postfix_unary_expression(
         parse_ident("false").map(|_| Expression::Bool(false)),
         parse_group(
             Delimiter::Parenthesis,
-            comma_separated_list(parse_expression).map(Expression::Tuple),
+            alt((
+                terminated(parse_expression, eof)
+                    .map(|expr| Expression::Parenthesized(Box::new(expr))),
+                comma_separated_list(parse_expression).map(Expression::Tuple),
+            )),
         ),
         parse_group(
             Delimiter::Bracket,
@@ -1027,7 +1031,8 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
     let tuple_or_parenthesized_type = parse_group(
         Delimiter::Parenthesis,
         alt((
-            terminated(parse_type, eof),
+            terminated(parse_type, eof)
+                .map(|type_| Type::Parenthesized(Box::new(type_))),
             comma_separated_list(parse_type).map(|types| Type::Tuple(types)),
         )),
     );
@@ -1130,7 +1135,8 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
     let tuple_or_parenthesized_pattern = parse_group(
         Delimiter::Parenthesis,
         alt((
-            terminated(parse_pattern_with_alt, eof),
+            terminated(parse_pattern_with_alt, eof)
+                .map(|pattern| Pattern::Parenthesized(Box::new(pattern))),
             comma_separated_list(parse_pattern_with_alt)
                 .map(|patterns| Pattern::Tuple(patterns)),
         )),
