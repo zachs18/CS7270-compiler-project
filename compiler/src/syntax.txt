@@ -29,7 +29,7 @@ TYPE:
  | '(' list[TYPE] ')'
  | '*' ('const' | 'mut') TYPE
 
-BLOCK: '{' STATEMENT* EXPRESSION? '}'
+BLOCK: '{' STATEMENT* EXPR_NO_BLOCK? '}'
 
 STATEMENT:
  | EXPRESSION ';'

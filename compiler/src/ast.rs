@@ -14,6 +14,7 @@ pub struct FnItem {
     pub args: Vec<FnParam>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug)]

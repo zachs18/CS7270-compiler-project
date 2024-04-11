@@ -227,7 +227,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
     let (input, fn_token) = parse_ident("fn")(input)?;
     let rest = move |input| {
         let (input, name) = parse_non_kw_ident(input)?;
-        let (input, args) = parse_fn_params(input)?;
+        let (input, (params, is_variadic)) = parse_fn_params(input)?;
         let (input, return_type) =
             opt(preceded(parse_joint_puncts("->"), parse_type))(input)?;
         if let Ok((input, ())) = parse_joint_puncts(";")(input) {
@@ -237,7 +237,8 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                     extern_token,
                     fn_token,
                     name,
-                    args,
+                    args: params,
+                    is_variadic,
                     return_type,
                     body: None,
                 },
@@ -250,7 +251,8 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                     extern_token,
                     fn_token,
                     name,
-                    args,
+                    args: params,
+                    is_variadic,
                     return_type,
                     body: Some(body),
                 },
@@ -870,13 +872,18 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
     .or_expected("a binary operator");
 }
 
-/// A [`fn` parameter](parse_fn_param) list.
+/// A [`fn` parameter](parse_fn_param) list, with an optional trailing `...` to
+/// indicate a variadic function. Note that a comma is not required between the
+/// parameters and the `...`.
 ///
 /// ```text
-/// '(' list[TYPED_PATTERN] ')'
+/// '(' list[TYPED_PATTERN] '...'? ')'
 /// ```
-fn parse_fn_params(input: &[TokenTree]) -> IResult<'_, Vec<FnParam>> {
-    let inner = comma_separated_list(parse_fn_param);
+fn parse_fn_params(input: &[TokenTree]) -> IResult<'_, (Vec<FnParam>, bool)> {
+    let inner = tuple((
+        comma_separated_list(parse_fn_param),
+        opt(parse_joint_puncts("...")).map(|opt| opt.is_some()),
+    ));
     parse_group(Delimiter::Parenthesis, inner)(input)
 }
 
