@@ -7,3 +7,8 @@ resolver = "2"
 
 [profile.dev]
 opt-level = 1
+
+[workspace.lints.clippy]
+todo = "warn"
+needless_lifetimes = "allow"
+match_like_matches_macro = "allow"

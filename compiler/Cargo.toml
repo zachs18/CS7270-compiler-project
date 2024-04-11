@@ -12,3 +12,6 @@ itertools = "0.12.1"
 nom = "7.1.3"
 object = { version = "0.34.0", features = ["write"] }
 zachs18-stdx = "0.1.3"
+
+[lints]
+workspace = true

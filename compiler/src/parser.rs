@@ -237,7 +237,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                     extern_token,
                     fn_token,
                     name,
-                    args: params,
+                    params,
                     is_variadic,
                     return_type,
                     body: None,
@@ -251,7 +251,7 @@ fn parse_fn_item(input: &[TokenTree]) -> IResult<'_, FnItem> {
                     extern_token,
                     fn_token,
                     name,
-                    args: params,
+                    params,
                     is_variadic,
                     return_type,
                     body: Some(body),
@@ -916,7 +916,7 @@ fn parse_any_ident(input: &[TokenTree]) -> IResult<'_, Ident> {
 
 /// Non-keyword identifiers.
 fn parse_non_kw_ident(input: &[TokenTree]) -> IResult<'_, Ident> {
-    verify(parse_any_ident, |ident: &Ident| !lexer::is_keyword(&ident.ident))(
+    verify(parse_any_ident, |ident: &Ident| !lexer::is_keyword(ident.ident))(
         input,
     )
 }
@@ -1033,7 +1033,7 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
         alt((
             terminated(parse_type, eof)
                 .map(|type_| Type::Parenthesized(Box::new(type_))),
-            comma_separated_list(parse_type).map(|types| Type::Tuple(types)),
+            comma_separated_list(parse_type).map(Type::Tuple),
         )),
     );
 
@@ -1131,14 +1131,13 @@ fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
         Delimiter::Bracket,
         comma_separated_list(parse_pattern_with_alt),
     )
-    .map(|patterns| Pattern::Array(patterns));
+    .map(Pattern::Array);
     let tuple_or_parenthesized_pattern = parse_group(
         Delimiter::Parenthesis,
         alt((
             terminated(parse_pattern_with_alt, eof)
                 .map(|pattern| Pattern::Parenthesized(Box::new(pattern))),
-            comma_separated_list(parse_pattern_with_alt)
-                .map(|patterns| Pattern::Tuple(patterns)),
+            comma_separated_list(parse_pattern_with_alt).map(Pattern::Tuple),
         )),
     );
     alt((

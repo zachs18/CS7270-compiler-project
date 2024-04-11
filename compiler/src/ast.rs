@@ -11,7 +11,7 @@ pub struct FnItem {
     pub extern_token: Option<Ident>,
     pub fn_token: Ident,
     pub name: Ident,
-    pub args: Vec<FnParam>,
+    pub params: Vec<FnParam>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,
     pub is_variadic: bool,

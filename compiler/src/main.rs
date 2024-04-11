@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use token::TokenTree;
 
 mod ast;
+mod hir;
 mod lexer;
 mod parser;
 mod span;
@@ -45,6 +46,10 @@ fn main() -> ExitCode {
     let items = parser::parse(&tokens);
 
     dbg!(&items);
+
+    let hir = hir::lower_ast_to_hir(items);
+
+    dbg!(&hir);
 
     ExitCode::SUCCESS
 }
