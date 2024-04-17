@@ -76,7 +76,7 @@ impl Eq for Ident {}
 
 impl PartialOrd for Ident {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.ident.partial_cmp(&other.ident)
+        Some(self.cmp(other))
     }
 }
 

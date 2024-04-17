@@ -9,7 +9,7 @@
 
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     hash::Hash,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -21,7 +21,7 @@ use either::Either;
 use once_cell::sync::Lazy;
 
 use crate::{
-    ast::{self, BinaryOp, ComparisonOp, UnaryOp},
+    ast::{self, BinaryOp, ComparisonOp},
     token::{Ident, Integer, StringLiteral},
     util::UnionFind,
 };
@@ -32,8 +32,8 @@ enum TypeVarKind {
     Integer,
 }
 
-pub struct TyCtx {
-    /// Unification constraints.
+struct TyCtx {
+    /// Type unification constraints.
     ///
     /// Type vars which must be the same type.
     constraints: UnionFind,
@@ -210,13 +210,25 @@ impl HirCtx<'_> {
                 *t2k = TypeVarKind::Integer;
                 self.ty_ctx.constraints.union(t1.0, t2.0)
             }
-            (Either::Left(..), Either::Right(..)) => {
+            (
+                Either::Left(TypeKind::Integer { .. }),
+                Either::Right(TypeVarKind::Integer),
+            )
+            | (Either::Left(..), Either::Right(TypeVarKind::Normal)) => {
                 *t2k = t1k.clone();
                 self.ty_ctx.constraints.union(t1.0, t2.0)
             }
-            (Either::Right(..), Either::Left(..)) => {
+            (
+                Either::Right(TypeVarKind::Integer),
+                Either::Left(TypeKind::Integer { .. }),
+            )
+            | (Either::Right(TypeVarKind::Normal), Either::Left(..)) => {
                 *t1k = t2k.clone();
                 self.ty_ctx.constraints.union(t1.0, t2.0)
+            }
+            (Either::Left(ref tk), Either::Right(TypeVarKind::Integer))
+            | (Either::Right(TypeVarKind::Integer), Either::Left(ref tk)) => {
+                panic!("cannot resolve {{integer}} == {tk:?}");
             }
             (Either::Left(tk1), Either::Left(tk2)) => match (&*tk1, &*tk2) {
                 (
@@ -242,7 +254,7 @@ impl HirCtx<'_> {
                     &TypeKind::Integer { signed: s2, bits: b2 },
                 ) => {
                     if s1 != s2 || b1 != b2 {
-                        panic!("cannot resolve {t1:?} == {t2:?}");
+                        panic!("cannot resolve {t1k:?} == {t2k:?}");
                     }
                     false
                 }
@@ -300,22 +312,41 @@ impl HirCtx<'_> {
     /// Returns `true` if a new substitution or constraint was added.
     fn constrain_integer(&mut self, ty: TypeIdx) -> bool {
         match self.ty_ctx.substitutions[ty.0] {
-            Either::Left(ref tk) => match tk {
-                TypeKind::Integer { .. } => false,
-                TypeKind::Pointer { .. }
-                | TypeKind::Array { .. }
-                | TypeKind::Slice { .. }
-                | TypeKind::Tuple(_)
-                | TypeKind::Bool
-                | TypeKind::Never
-                | TypeKind::Function { .. } => {
-                    panic!("not an integer")
-                }
-            },
+            Either::Left(TypeKind::Integer { .. }) => false,
+            Either::Left(ref tk) => {
+                panic!("cannot resolve {{integer}} == {tk:?}")
+            }
             Either::Right(ref mut tv) => {
                 let changed = *tv != TypeVarKind::Integer;
                 *tv = TypeVarKind::Integer;
                 changed
+            }
+        }
+    }
+
+    /// Returns `true` in the first tuple element if a new constraint was added.
+    ///
+    /// Returns the `TypeIdx` of the pointee type in the second tuple
+    /// element.
+    fn constrain_pointer(
+        &mut self, ty: TypeIdx, mutable: bool,
+    ) -> (bool, TypeIdx) {
+        match self.ty_ctx.substitutions[ty.0] {
+            Either::Left(TypeKind::Pointer { pointee, mutable: m }) => {
+                assert_eq!(mutable, m, "cannot resolve *const _ == *mut _");
+                (false, pointee)
+            }
+            Either::Left(ref tk) => {
+                panic!("cannot resolve {tk:?} == pointer")
+            }
+            Either::Right(TypeVarKind::Integer) => {
+                panic!("cannot resolve {{integer}} == pointer")
+            }
+            Either::Right(TypeVarKind::Normal) => {
+                let pointee = self.ty_ctx.new_var();
+                let tk = TypeKind::Pointer { mutable, pointee };
+                self.ty_ctx.substitutions[ty.0] = Either::Left(tk);
+                (true, pointee)
             }
         }
     }
@@ -423,9 +454,13 @@ impl HirCtx<'_> {
         } else if lhs.is_pointer(self).unwrap_or(false) {
             // Can only add pointer to integer. lhs is pointer, rhs is integer
             changed |= self.constrain_integer(rhs);
+            // `ptr + int -> ptr`
+            changed |= self.constrain_eq(lhs, result);
         } else if rhs.is_pointer(self).unwrap_or(false) {
             // Can only add pointer to integer. rhs is pointer, lhs is integer
             changed |= self.constrain_integer(lhs);
+            // `int + ptr -> ptr`
+            changed |= self.constrain_eq(rhs, result);
         } else {
             // Either lhs or rhs *could* be a poitner
             log::warn!("TODO: type check additions");
@@ -477,7 +512,9 @@ impl HirCtx<'_> {
             Either::Right(TypeVarKind::Integer) => {
                 panic!("cannot index into an integer")
             }
-            Either::Right(TypeVarKind::Normal) => {}
+            Either::Right(TypeVarKind::Normal) => {
+                log::warn!("TODO: constrain_index");
+            }
             Either::Left(TypeKind::Pointer { pointee, .. }) => {
                 changed |= self.constrain_eq(pointee, result);
             }
@@ -625,7 +662,7 @@ impl TypeIdx {
                 TypeKind::Pointer { pointee, .. } => pointee.is_concrete(ctx),
                 TypeKind::Array { element, .. } => element.is_concrete(ctx),
                 TypeKind::Slice { element } => element.is_concrete(ctx),
-                TypeKind::Integer { signed, bits } => true,
+                TypeKind::Integer { .. } => true,
                 TypeKind::Bool => true,
                 TypeKind::Tuple(types) => {
                     types.iter().all(|type_idx| type_idx.is_concrete(ctx))
@@ -758,6 +795,15 @@ impl Expression {
             type_: ctx.ty_ctx.new_var(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum UnaryOp {
+    Not,
+    Neg,
+    AddrOf { mutable: bool },
+    Deref,
+    AsCast { to_type: TypeIdx },
 }
 
 #[derive(Debug)]
@@ -1009,6 +1055,22 @@ impl Lower for ast::Type {
     }
 }
 
+impl Lower for ast::UnaryOp {
+    type Output = UnaryOp;
+
+    fn lower(self, ctx: &mut HirCtx) -> Self::Output {
+        match self {
+            ast::UnaryOp::Not => UnaryOp::Not,
+            ast::UnaryOp::Neg => UnaryOp::Neg,
+            ast::UnaryOp::AddrOf { mutable } => UnaryOp::AddrOf { mutable },
+            ast::UnaryOp::Deref => UnaryOp::Deref,
+            ast::UnaryOp::AsCast { to_type } => {
+                UnaryOp::AsCast { to_type: to_type.lower(ctx) }
+            }
+        }
+    }
+}
+
 impl Lower for ast::Expression {
     type Output = Expression;
 
@@ -1032,7 +1094,7 @@ impl Lower for ast::Expression {
             }
             ast::Expression::Parenthesized(expr) => (*expr).lower(ctx),
             ast::Expression::UnaryOp { op, operand } => {
-                Expression::unary_op(op, operand.lower(ctx), ctx)
+                Expression::unary_op(op.lower(ctx), operand.lower(ctx), ctx)
             }
             ast::Expression::BinaryOp { lhs, op, rhs } => {
                 Expression::binary_op(lhs.lower(ctx), op, rhs.lower(ctx), ctx)
@@ -1547,7 +1609,33 @@ impl TypeCheck for Expression {
             }
             ExpressionKind::Array(_) => todo!(),
             ExpressionKind::Tuple(_) => todo!(),
-            ExpressionKind::UnaryOp { op, operand } => todo!(),
+            ExpressionKind::UnaryOp { op, operand } => {
+                let mut changed = operand.type_check(ctx);
+                match op {
+                    UnaryOp::Not => todo!(),
+                    UnaryOp::Neg => {
+                        changed |= ctx.constrain_integer(operand.type_);
+                    }
+                    UnaryOp::AddrOf { mutable } => todo!(),
+                    UnaryOp::Deref => {
+                        todo!(
+                            "constrain pointer without constraining \
+                             mutability?"
+                        );
+                        // let (c, pointee) =
+                        // ctx.constrain_pointer(operand.type_);
+                        // changed |= c;
+                        // changed |= ctx.constrain_eq(pointee, self.type_);
+                    }
+                    UnaryOp::AsCast { to_type } => {
+                        changed |= ctx.constrain_eq(*to_type, self.type_);
+                        todo!(
+                            "changed |= ctx.constrain_as_castable(src, dst);"
+                        );
+                    }
+                }
+                changed
+            }
             ExpressionKind::BinaryOp { lhs, op, rhs } => {
                 let mut changed = lhs.type_check(ctx);
                 changed |= rhs.type_check(ctx);
@@ -1648,7 +1736,7 @@ impl TypeCheck for Expression {
             ExpressionKind::UnaryOp { operand, .. } => {
                 operand.assert_concrete(ctx)
             }
-            ExpressionKind::BinaryOp { lhs, op, rhs } => {
+            ExpressionKind::BinaryOp { lhs, rhs, .. } => {
                 lhs.assert_concrete(ctx);
                 rhs.assert_concrete(ctx);
             }
@@ -1718,14 +1806,14 @@ impl TypeCheck for Statement {
 
     fn assert_concrete(&self, ctx: &HirCtx) {
         match self {
-            Statement::LetStatement { pattern, type_, initializer } => {
+            Statement::LetStatement { type_, initializer, .. } => {
                 assert!(
                     type_.is_concrete(ctx),
                     "let statement's type is not concrete"
                 );
                 initializer.assert_concrete(ctx);
             }
-            Statement::Expression { expression, has_semicolon } => {
+            Statement::Expression { expression, .. } => {
                 expression.assert_concrete(ctx)
             }
         }

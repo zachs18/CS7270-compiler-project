@@ -89,20 +89,6 @@ impl<'a> ParseError<&'a [TokenTree]> for ParseError_<'a> {
     }
 }
 
-pub fn separated_list<I, O, O2, E, F, G>(
-    sep: G, f: F,
-) -> impl FnMut(I) -> nom::IResult<I, Vec<O>, E>
-where
-    I: Clone + nom::InputLength,
-    F: Parser<I, O, E>,
-    G: Parser<I, O2, E> + Clone,
-    E: ParseError<I>,
-{
-    let mut inner = opt(terminated(separated_list1(sep.clone(), f), opt(sep)))
-        .map(Option::unwrap_or_default);
-    move |input| inner.parse(input)
-}
-
 /// Rust-style comma-separated lists, allowing a trailing comma, but not
 /// allowing a comma with nothing before it.
 fn comma_separated_list<'input, O, F>(
@@ -876,11 +862,8 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
             return Ok((input, binop));
         }
     }
-    return Err(nom::Err::Error(ParseError::from_error_kind(
-        input,
-        ErrorKind::IsA,
-    )))
-    .or_expected("a binary operator");
+    Err(nom::Err::Error(ParseError::from_error_kind(input, ErrorKind::IsA)))
+        .or_expected("a binary operator")
 }
 
 /// A [`fn` parameter](parse_fn_param) list, with an optional trailing `...` to
