@@ -26,20 +26,24 @@ impl UnionFind {
     }
 
     /// Returns `None` if the key is not in the data structure
-    pub fn root_of(&self, key: usize) -> Option<usize> {
+    pub fn strict_root_of(&self, key: usize) -> Option<usize> {
         let parent = self.parents.get(key)?;
         if parent.get() == key {
             return Some(key);
         } else if parent.get() == usize::MAX {
             return None;
         }
-        let Some(root) = self.root_of(parent.get()) else {
+        let Some(root) = self.strict_root_of(parent.get()) else {
             unreachable!(
                 "if a key is in the data structure, it's parent must also be"
             );
         };
         parent.set(root);
         Some(root)
+    }
+
+    pub fn root_of(&self, key: usize) -> usize {
+        self.strict_root_of(key).unwrap_or(key)
     }
 
     /// Merges the sets containing the two keys.
@@ -51,8 +55,8 @@ impl UnionFind {
     pub fn union(&mut self, k1: usize, k2: usize) -> bool {
         self.insert(k1);
         self.insert(k2);
-        let root1 = self.root_of(k1).expect("we just inserted k1");
-        let root2 = self.root_of(k2).expect("we just inserted k2");
+        let root1 = self.strict_root_of(k1).expect("we just inserted k1");
+        let root2 = self.strict_root_of(k2).expect("we just inserted k2");
         if root1 != root2 {
             self.parents[root2].set(root1);
             true
@@ -85,7 +89,7 @@ mod tests {
     fn randoms() {
         let mut rng = rand::thread_rng();
         let mut union_find = UnionFind::new();
-        for i in 0..1000 {
+        for _ in 0..1000 {
             for i in 0..100 {
                 dbg!(union_find.root_of(i));
             }

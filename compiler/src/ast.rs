@@ -94,7 +94,7 @@ pub enum ComparisonOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Arithmetic(ArithmeticOp),
-    Assignment { augment: Option<ArithmeticOp> },
+    Assignment,
     Comparison(ComparisonOp),
     RangeOp { end_inclusive: bool },
 }

@@ -1,3 +1,5 @@
+#![feature(get_many_mut)]
+
 use std::process::ExitCode;
 
 use token::TokenTree;
@@ -20,7 +22,23 @@ fn usage() -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    )
+    .format(|buf, record| {
+        use std::io::Write;
+        writeln!(
+            buf,
+            "{}:{} {} [{}] - {}",
+            record.file().unwrap_or("unknown"),
+            record.line().unwrap_or(0),
+            buf.timestamp(),
+            record.level(),
+            record.args()
+        )
+    })
+    .init();
 
     let args: Vec<_> = std::env::args().collect();
     let Ok([_, infilename, outfilename]) = <[_; 3]>::try_from(args) else {

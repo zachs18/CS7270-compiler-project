@@ -829,7 +829,7 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
     use BinaryOp as B;
     use ComparisonOp as C;
     // sorted longest first to avoid parsing ambiguity
-    static BINOPS: [(&str, BinaryOp); 33] = sorted_by_length_decreasing([
+    static BINOPS: [(&str, BinaryOp); /* 33 */ 21] = sorted_by_length_decreasing([
         ("+", B::Arithmetic(A::Add)),
         ("-", B::Arithmetic(A::Subtract)),
         ("*", B::Arithmetic(A::Multiply)),
@@ -848,19 +848,20 @@ fn parse_binop(input: &[TokenTree]) -> IResult<'_, BinaryOp> {
         ("!=", B::Comparison(C::NotEqual)),
         ("<", B::Comparison(C::Less)),
         (">", B::Comparison(C::Greater)),
-        ("=", B::Assignment { augment: None }),
-        ("+=", B::Assignment { augment: Some(A::Add) }),
-        ("-=", B::Assignment { augment: Some(A::Subtract) }),
-        ("*=", B::Assignment { augment: Some(A::Multiply) }),
-        ("/=", B::Assignment { augment: Some(A::Divide) }),
-        ("%=", B::Assignment { augment: Some(A::Modulo) }),
-        ("&&=", B::Assignment { augment: Some(A::And) }),
-        ("||=", B::Assignment { augment: Some(A::Or) }),
-        ("&=", B::Assignment { augment: Some(A::BitAnd) }),
-        ("|=", B::Assignment { augment: Some(A::BitOr) }),
-        ("^=", B::Assignment { augment: Some(A::BitXor) }),
-        (">>=", B::Assignment { augment: Some(A::RightShift) }),
-        ("<<=", B::Assignment { augment: Some(A::LeftShift) }),
+        ("=", B::Assignment),
+        // ("=", B::Assignment { augment: None }),
+        // ("+=", B::Assignment { augment: Some(A::Add) }),
+        // ("-=", B::Assignment { augment: Some(A::Subtract) }),
+        // ("*=", B::Assignment { augment: Some(A::Multiply) }),
+        // ("/=", B::Assignment { augment: Some(A::Divide) }),
+        // ("%=", B::Assignment { augment: Some(A::Modulo) }),
+        // ("&&=", B::Assignment { augment: Some(A::And) }),
+        // ("||=", B::Assignment { augment: Some(A::Or) }),
+        // ("&=", B::Assignment { augment: Some(A::BitAnd) }),
+        // ("|=", B::Assignment { augment: Some(A::BitOr) }),
+        // ("^=", B::Assignment { augment: Some(A::BitXor) }),
+        // (">>=", B::Assignment { augment: Some(A::RightShift) }),
+        // ("<<=", B::Assignment { augment: Some(A::LeftShift) }),
         ("..", B::RangeOp { end_inclusive: false }),
         ("..=", B::RangeOp { end_inclusive: true }),
     ]);

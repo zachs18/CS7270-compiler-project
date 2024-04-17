@@ -134,6 +134,9 @@ impl TyCtx {
         type_idx
     }
 
+    /// can't use this easily because we don't have coercions, so `something ==
+    /// Never` will fail instead of coercing.
+    #[cfg(any())]
     fn never_type(&self) -> TypeIdx {
         let type_idx = TypeIdx(2);
         debug_assert!(matches!(
@@ -155,17 +158,6 @@ pub struct HirCtx<'a> {
     ty_ctx: Either<&'a mut TyCtx, Box<TyCtx>>,
 }
 
-fn get_many_mut<T>(slice: &mut [T], [k1, k2]: [usize; 2]) -> [&mut T; 2] {
-    assert!(k1 != k2);
-    if k1 < k2 {
-        let (a, b) = slice.split_at_mut(k2);
-        [&mut a[k1], &mut b[0]]
-    } else {
-        let (a, b) = slice.split_at_mut(k1);
-        [&mut a[k2], &mut b[0]]
-    }
-}
-
 impl HirCtx<'_> {
     fn prelude() -> Self {
         let (ty_ctx, type_scope) = TyCtx::new();
@@ -181,10 +173,7 @@ impl HirCtx<'_> {
         for item in hir {
             let name = item.name();
             let type_ = item.type_();
-            assert!(
-                type_.is_concrete(&self.ty_ctx),
-                "item type must be concrete"
-            );
+            assert!(type_.is_concrete(self), "item type must be concrete");
             if self.value_scope.this_scope.insert(name, type_).is_some() {
                 panic!("duplicate item {:?}", item);
             }
@@ -199,13 +188,13 @@ impl HirCtx<'_> {
 
     /// Returns `true` if a new substitution or constraint was added.
     fn constrain_eq(&mut self, t1: TypeIdx, t2: TypeIdx) -> bool {
-        let t1 = TypeIdx(self.ty_ctx.constraints.root_of(t1.0).unwrap_or(t1.0));
-        let t2 = TypeIdx(self.ty_ctx.constraints.root_of(t2.0).unwrap_or(t2.0));
+        let t1 = TypeIdx(self.ty_ctx.constraints.root_of(t1.0));
+        let t2 = TypeIdx(self.ty_ctx.constraints.root_of(t2.0));
         if t1.0 == t2.0 {
             return false;
         }
         let [t1k, t2k] =
-            get_many_mut(&mut self.ty_ctx.substitutions, [t1.0, t2.0]);
+            self.ty_ctx.substitutions.get_many_mut([t1.0, t2.0]).unwrap();
         match (&mut *t1k, &mut *t2k) {
             (
                 Either::Right(TypeVarKind::Normal),
@@ -275,7 +264,7 @@ impl HirCtx<'_> {
                 }
                 (TypeKind::Never, TypeKind::Never) => false,
                 (_, TypeKind::Never) | (TypeKind::Never, _) => {
-                    eprintln!("TODO: coercions in a non-hacky way");
+                    log::warn!("TODO: coercions in a non-hacky way");
                     false
                 }
                 (
@@ -339,12 +328,7 @@ impl HirCtx<'_> {
         &mut self, ty: TypeIdx, length: usize,
     ) -> (bool, TypeIdx) {
         match self.ty_ctx.substitutions[ty.0] {
-            Either::Right(tv) => {
-                assert_eq!(
-                    tv,
-                    TypeVarKind::Normal,
-                    "cannot resolve [_; {length}] == TypeVarKind::{tv:?}"
-                );
+            Either::Right(TypeVarKind::Normal) => {
                 let element = self.ty_ctx.new_var();
                 self.ty_ctx.substitutions[ty.0] =
                     Either::Left(TypeKind::Array { element, length });
@@ -357,9 +341,36 @@ impl HirCtx<'_> {
                 );
                 (false, element)
             }
-            Either::Left(ref ty) => {
-                panic!("cannot resolve [_; {length}] == {ty:?}")
+            ref t => {
+                panic!("cannot resolve [_; {length}] == {t:?}")
             }
+        }
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    fn constrain_bool(&mut self, ty: TypeIdx) -> bool {
+        match self.ty_ctx.substitutions[ty.0] {
+            Either::Right(TypeVarKind::Normal) => {
+                self.ty_ctx.substitutions[ty.0] = Either::Left(TypeKind::Bool);
+                true
+            }
+            Either::Left(TypeKind::Bool) => false,
+            ref t => panic!("cannot resolve bool == {t:?}"),
+        }
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    fn constrain_unit(&mut self, ty: TypeIdx) -> bool {
+        match self.ty_ctx.substitutions[ty.0] {
+            Either::Right(TypeVarKind::Normal) => {
+                self.ty_ctx.substitutions[ty.0] =
+                    Either::Left(TypeKind::Tuple(EMPTY_TYPE_LIST.clone()));
+                true
+            }
+            Either::Left(TypeKind::Tuple(ref types)) if types.is_empty() => {
+                false
+            }
+            ref t => panic!("cannot resolve bool == {t:?}"),
         }
     }
 
@@ -380,6 +391,103 @@ impl HirCtx<'_> {
             Pattern::Tuple(_) => todo!(),
             Pattern::Range { start, inclusive, end } => todo!(),
         }
+    }
+
+    /// Constrain `lhs + rhs` expression types.
+    ///
+    /// Allowed cases:
+    ///
+    /// * `iN + iN -> iN` (or `uN`)
+    /// * `ptr + iN -> ptr` (or `uN`)
+    /// * `iN + ptr -> ptr` (or `uN`)
+    fn constrain_add(
+        &mut self, lhs: TypeIdx, rhs: TypeIdx, result: TypeIdx,
+    ) -> bool {
+        let mut changed = false;
+        let lhs = TypeIdx(self.ty_ctx.constraints.root_of(lhs.0));
+        let rhs = TypeIdx(self.ty_ctx.constraints.root_of(rhs.0));
+        let result = TypeIdx(self.ty_ctx.constraints.root_of(result.0));
+        if lhs.0 == rhs.0
+            || (lhs.is_integer(self).unwrap_or(false)
+                && rhs.is_integer(self).unwrap_or(false))
+        {
+            // If lhs and rhs are the same, they must be integers.
+            // If lhs and rhs are both integers, they must be the same type.
+
+            // Only integers can be added to themselves, not pointers.
+            changed |= self.constrain_integer(lhs);
+            // Only same-type integers can be added.
+            changed |= self.constrain_eq(lhs, rhs);
+            // Adding integers produces the same type;
+            changed |= self.constrain_eq(lhs, result);
+        } else if lhs.is_pointer(self).unwrap_or(false) {
+            // Can only add pointer to integer. lhs is pointer, rhs is integer
+            changed |= self.constrain_integer(rhs);
+        } else if rhs.is_pointer(self).unwrap_or(false) {
+            // Can only add pointer to integer. rhs is pointer, lhs is integer
+            changed |= self.constrain_integer(lhs);
+        } else {
+            // Either lhs or rhs *could* be a poitner
+            log::warn!("TODO: type check additions");
+        }
+        changed
+    }
+
+    /// Constrain `lhs - rhs` expression types
+    ///
+    /// Allowed cases:
+    ///
+    /// * `iN - iN -> iN` (or `uN`)
+    /// * `ptr - isize -> ptr`
+    /// * `ptr - usize -> ptr`
+    /// * `ptr - ptr -> isize` (same pointee)
+    fn constrain_subtract(
+        &mut self, lhs: TypeIdx, rhs: TypeIdx, result: TypeIdx,
+    ) -> bool {
+        let mut changed = false;
+        if lhs.is_integer(self).unwrap_or(false) {
+            // Can only subtract integer from integer
+            // Only same-type integers can be subtracted.
+            changed |= self.constrain_eq(lhs, rhs);
+            // Subtracting integers produces the same type;
+            changed |= self.constrain_eq(lhs, result);
+        } else {
+            log::warn!("TODO: type check subtractions");
+        }
+        changed
+    }
+
+    /// Constrain `base[index]` expression types.
+    ///
+    /// Allowed cases:
+    ///
+    /// * `pointer[iN]` (or `uN`)
+    /// * `array[iN]` (or `uN`)
+    fn constrain_index(
+        &mut self, base: TypeIdx, index: TypeIdx, result: TypeIdx,
+    ) -> bool {
+        let mut changed = false;
+        let base = TypeIdx(self.ty_ctx.constraints.root_of(base.0));
+        let index = TypeIdx(self.ty_ctx.constraints.root_of(index.0));
+        let result = TypeIdx(self.ty_ctx.constraints.root_of(result.0));
+
+        self.constrain_integer(index);
+
+        match self.ty_ctx.substitutions[base.0] {
+            Either::Right(TypeVarKind::Integer) => {
+                panic!("cannot index into an integer")
+            }
+            Either::Right(TypeVarKind::Normal) => {}
+            Either::Left(TypeKind::Pointer { pointee, .. }) => {
+                changed |= self.constrain_eq(pointee, result);
+            }
+            Either::Left(TypeKind::Array { element, .. }) => {
+                changed |= self.constrain_eq(element, result);
+            }
+            Either::Left(ref t) => panic!("cannot index into a {t:?}"),
+        }
+
+        changed
     }
 }
 
@@ -510,8 +618,8 @@ pub enum TypeKind {
 }
 
 impl TypeIdx {
-    fn is_concrete(&self, ctx: &TyCtx) -> bool {
-        match ctx.substitutions[self.0] {
+    fn is_concrete(&self, ctx: &HirCtx) -> bool {
+        match ctx.ty_ctx.substitutions[self.0] {
             Either::Right(_) => false,
             Either::Left(ref type_kind) => match type_kind {
                 TypeKind::Pointer { pointee, .. } => pointee.is_concrete(ctx),
@@ -530,6 +638,24 @@ impl TypeIdx {
                             .all(|type_idx| type_idx.is_concrete(ctx))
                 }
             },
+        }
+    }
+
+    fn is_integer(&self, ctx: &HirCtx) -> Option<bool> {
+        match ctx.ty_ctx.substitutions[self.0] {
+            Either::Right(TypeVarKind::Integer) => Some(true),
+            Either::Right(TypeVarKind::Normal) => None,
+            Either::Left(TypeKind::Integer { .. }) => Some(true),
+            Either::Left(..) => Some(false),
+        }
+    }
+
+    fn is_pointer(&self, ctx: &HirCtx) -> Option<bool> {
+        match ctx.ty_ctx.substitutions[self.0] {
+            Either::Right(TypeVarKind::Integer) => Some(false),
+            Either::Right(TypeVarKind::Normal) => None,
+            Either::Left(TypeKind::Pointer { .. }) => Some(true),
+            Either::Left(..) => Some(false),
         }
     }
 }
@@ -612,7 +738,7 @@ impl Expression {
     ) -> Expression {
         Expression {
             kind: ExpressionKind::Break { value },
-            type_: ctx.ty_ctx.never_type(),
+            type_: ctx.ty_ctx.new_var(),
         }
     }
     fn return_expr(
@@ -620,7 +746,7 @@ impl Expression {
     ) -> Expression {
         Expression {
             kind: ExpressionKind::Return { value },
-            type_: ctx.ty_ctx.never_type(),
+            type_: ctx.ty_ctx.new_var(),
         }
     }
 }
@@ -707,7 +833,43 @@ pub fn lower_ast_to_hir(ast: Vec<ast::Item>) -> Vec<Item> {
     let mut hir = ast.lower(&mut ctx);
     ctx.register_globals(&hir);
 
-    while hir.type_check(&mut ctx) {}
+    // Keep type checking until no changes occur, then resolve integer variables
+    // to `i32`, then resolve unbound type vars to unit.
+
+    loop {
+        while hir.type_check(&mut ctx) {}
+
+        // Resolve integer type vars to i32
+        for t in &mut ctx.ty_ctx.substitutions {
+            if matches!(t, Either::Right(TypeVarKind::Integer)) {
+                *t = Either::Left(TypeKind::Integer {
+                    signed: true,
+                    bits: Either::Left(32),
+                });
+            }
+        }
+
+        // If resolving integer type vars caused more inference to be possible,
+        // start the loop over.
+        if hir.type_check(&mut ctx) {
+            continue;
+        }
+
+        // Resolve unknown type vars to i32
+        for t in &mut ctx.ty_ctx.substitutions {
+            if matches!(t, Either::Right(TypeVarKind::Normal)) {
+                *t = Either::Left(TypeKind::Tuple(EMPTY_TYPE_LIST.clone()));
+            }
+        }
+
+        // If resolving unknown type vars caused more inference to be possible,
+        // start the loop over, else break
+        if !hir.type_check(&mut ctx) {
+            break;
+        }
+    }
+
+    hir.assert_concrete(&ctx);
 
     hir
 }
@@ -819,18 +981,20 @@ impl Lower for ast::Type {
                 let element = (*element).lower(ctx);
                 ctx.ty_ctx.insert_type(TypeKind::Slice { element })
             }
-            ast::Type::Ident(ident) => ctx
+            ast::Type::Ident(ident) => *ctx
                 .type_scope
                 .lookup(&Symbol::Ident(ident))
-                .expect("unknown type")
-                .clone(),
+                .expect("unknown type"),
             ast::Type::Tuple(types) => {
                 let types =
                     types.into_iter().map(|type_| type_.lower(ctx)).collect();
                 ctx.ty_ctx.insert_type(TypeKind::Tuple(types))
             }
             ast::Type::Parenthesized(type_) => (*type_).lower(ctx),
-            ast::Type::Never => ctx.ty_ctx.never_type(),
+            // TODO: since we don't have coercions, we can't use never_type
+            // here, since otherwise it would try to check
+            // `something == Never` and fail.
+            ast::Type::Never => ctx.ty_ctx.new_var(),
         }
     }
 }
@@ -943,7 +1107,7 @@ impl Lower for ast::Expression {
                 //             body
                 //             // if end_inclusive is true, the break is after
                 // the body             if i >= end { break }
-                //             i += 1;
+                //             i = i + 1;
                 //         };
                 //     };
                 // }
@@ -1024,16 +1188,20 @@ impl Lower for ast::Expression {
                     expression: body,
                     has_semicolon: true,
                 };
+                let i_plus_one_expr = Expression::binary_op(
+                    Box::new(Expression::ident(iter_ident, ctx)),
+                    BinaryOp::Arithmetic(ast::ArithmeticOp::Add),
+                    Box::new(Expression::integer(
+                        Integer::new_unspanned(1),
+                        ctx,
+                    )),
+                    ctx,
+                );
                 let increment_i_stmt = Statement::Expression {
                     expression: Expression::binary_op(
                         Box::new(Expression::ident(iter_ident, ctx)),
-                        BinaryOp::Assignment {
-                            augment: Some(ast::ArithmeticOp::Add),
-                        },
-                        Box::new(Expression::integer(
-                            Integer::new_unspanned(1),
-                            ctx,
-                        )),
+                        BinaryOp::Assignment,
+                        Box::new(i_plus_one_expr),
                         ctx,
                     ),
                     has_semicolon: true,
@@ -1217,11 +1385,20 @@ impl Lower for ast::Statement {
 trait TypeCheck {
     /// Returns `true` if anything in this node changed.
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool;
+
+    /// Panics with a message if self is not type-checked to concreteness.
+    fn assert_concrete(&self, ctx: &HirCtx);
 }
 
 impl<T: TypeCheck> TypeCheck for Option<T> {
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool {
         self.as_mut().map_or(false, |t| t.type_check(ctx))
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        if let Some(this) = self {
+            this.assert_concrete(ctx);
+        }
     }
 }
 
@@ -1234,11 +1411,21 @@ impl<T: TypeCheck> TypeCheck for Vec<T> {
             .fold(false, |a, b| a || b);
         result
     }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        for t in self {
+            t.assert_concrete(ctx);
+        }
+    }
 }
 
 impl<T: TypeCheck> TypeCheck for Box<T> {
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool {
         (**self).type_check(ctx)
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        (**self).assert_concrete(ctx)
     }
 }
 
@@ -1247,6 +1434,13 @@ impl TypeCheck for Item {
         match self {
             Item::FnItem(item) => item.type_check(ctx),
             Item::StaticItem(item) => item.type_check(ctx),
+        }
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        match self {
+            Item::FnItem(item) => item.assert_concrete(ctx),
+            Item::StaticItem(item) => item.assert_concrete(ctx),
         }
     }
 }
@@ -1283,6 +1477,15 @@ impl TypeCheck for FnItem {
 
         changed
     }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        assert!(
+            self.signature.is_concrete(ctx),
+            "fn item {:?}'s signature is not concrete",
+            self.name
+        );
+        self.body.assert_concrete(ctx);
+    }
 }
 
 impl TypeCheck for StaticItem {
@@ -1292,6 +1495,15 @@ impl TypeCheck for StaticItem {
             changed |= ctx.constrain_eq(self.type_, expr.type_);
         }
         changed
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        assert!(
+            self.type_.is_concrete(ctx),
+            "static {:?}'s type is not concrete",
+            self.name
+        );
+        self.initializer.assert_concrete(ctx);
     }
 }
 
@@ -1316,27 +1528,25 @@ impl TypeCheck for Expression {
                 let mut changed = lhs.type_check(ctx);
                 changed |= rhs.type_check(ctx);
                 match *op {
-                    BinaryOp::Assignment { augment: None } => {
+                    BinaryOp::Assignment => {
                         changed |= ctx.constrain_eq(lhs.type_, rhs.type_);
+                        changed |= ctx.constrain_unit(self.type_);
                     }
-                    BinaryOp::Arithmetic(op)
-                    | BinaryOp::Assignment { augment: Some(op) } => {
+                    BinaryOp::Arithmetic(op) => {
                         use ast::ArithmeticOp as A;
                         match op {
                             A::And | A::Or => {
-                                changed |= ctx.constrain_eq(
-                                    ctx.ty_ctx.bool_type(),
-                                    lhs.type_,
-                                );
-                                changed |= ctx.constrain_eq(
-                                    ctx.ty_ctx.bool_type(),
-                                    rhs.type_,
-                                );
+                                changed |= ctx.constrain_bool(lhs.type_);
+                                changed |= ctx.constrain_bool(rhs.type_);
+                                changed |= ctx.constrain_bool(self.type_);
                             }
                             A::BitAnd | A::BitOr | A::BitXor => {
+                                log::warn!("TODO: maybe allow bitops on bool?");
                                 changed |= ctx.constrain_integer(lhs.type_);
                                 changed |=
                                     ctx.constrain_eq(lhs.type_, rhs.type_);
+                                changed |=
+                                    ctx.constrain_eq(lhs.type_, self.type_);
                             }
                             A::Modulo
                             | A::Multiply
@@ -1345,12 +1555,20 @@ impl TypeCheck for Expression {
                             | A::RightShift => {
                                 changed |= ctx.constrain_integer(lhs.type_);
                                 changed |= ctx.constrain_integer(rhs.type_);
+                                changed |=
+                                    ctx.constrain_eq(lhs.type_, self.type_);
                             }
-                            A::Add => todo!("pointers"),
-                            A::Subtract => todo!("pointers"),
+                            A::Add => {
+                                changed |= ctx.constrain_add(
+                                    lhs.type_, rhs.type_, self.type_,
+                                )
+                            }
+                            A::Subtract => {
+                                changed |= ctx.constrain_subtract(
+                                    lhs.type_, rhs.type_, self.type_,
+                                )
+                            }
                         };
-                        changed |= ctx
-                            .constrain_eq(self.type_, ctx.ty_ctx.unit_type());
                     }
                     BinaryOp::Comparison(_) => {
                         changed |= ctx
@@ -1370,10 +1588,7 @@ impl TypeCheck for Expression {
                     changed |=
                         ctx.constrain_eq(then_block_ty_idx, else_block_ty_idx);
                 } else {
-                    changed |= ctx.constrain_eq(
-                        then_block_ty_idx,
-                        ctx.ty_ctx.unit_type(),
-                    );
+                    changed |= ctx.constrain_unit(then_block_ty_idx);
                 }
                 changed
             }
@@ -1384,12 +1599,57 @@ impl TypeCheck for Expression {
             ExpressionKind::Index { base, index } => {
                 let mut changed = base.type_check(ctx);
                 changed |= index.type_check(ctx);
-                eprintln!("TODO: check if type is indexable with index type");
+                changed |=
+                    ctx.constrain_index(base.type_, index.type_, self.type_);
                 changed
             }
             ExpressionKind::Call { function, args } => todo!(),
             ExpressionKind::Break { value } => value.type_check(ctx),
             ExpressionKind::Return { value } => value.type_check(ctx),
+        }
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        assert!(
+            self.type_.is_concrete(ctx),
+            "expression's type is not concrete: {self:?}"
+        );
+        match &self.kind {
+            ExpressionKind::Ident(..)
+            | ExpressionKind::Integer(..)
+            | ExpressionKind::Bool(..) => {}
+            ExpressionKind::Array(elems) => elems.assert_concrete(ctx),
+            ExpressionKind::Tuple(elems) => elems.assert_concrete(ctx),
+            ExpressionKind::UnaryOp { operand, .. } => {
+                operand.assert_concrete(ctx)
+            }
+            ExpressionKind::BinaryOp { lhs, op, rhs } => {
+                lhs.assert_concrete(ctx);
+                rhs.assert_concrete(ctx);
+            }
+            ExpressionKind::If { condition, then_block, else_block } => {
+                condition.assert_concrete(ctx);
+                then_block.assert_concrete(ctx);
+                else_block.assert_concrete(ctx);
+            }
+            ExpressionKind::Loop(body) => body.assert_concrete(ctx),
+            ExpressionKind::Block(body) => body.assert_concrete(ctx),
+            ExpressionKind::Match { scrutinee, arms } => {
+                scrutinee.assert_concrete(ctx);
+                todo!();
+                // arms.assert_concrete(ctx);
+            }
+            ExpressionKind::Wildcard => {}
+            ExpressionKind::Index { base, index } => {
+                base.assert_concrete(ctx);
+                index.assert_concrete(ctx);
+            }
+            ExpressionKind::Call { function, args } => {
+                function.assert_concrete(ctx);
+                args.assert_concrete(ctx);
+            }
+            ExpressionKind::Break { value } => value.assert_concrete(ctx),
+            ExpressionKind::Return { value } => value.assert_concrete(ctx),
         }
     }
 }
@@ -1399,6 +1659,13 @@ impl TypeCheck for Block {
         let stmts_changed = self.statements.type_check(ctx);
         let tail_changed = self.tail.type_check(ctx);
         stmts_changed || tail_changed
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        for stmt in &self.statements {
+            stmt.assert_concrete(ctx);
+        }
+        self.tail.assert_concrete(ctx);
     }
 }
 
@@ -1417,10 +1684,24 @@ impl TypeCheck for Statement {
                 let mut changed = expression.type_check(ctx);
                 if !*has_semicolon {
                     // Must be unit type
-                    changed |= ctx
-                        .constrain_eq(expression.type_, ctx.ty_ctx.unit_type());
+                    changed |= ctx.constrain_unit(expression.type_);
                 }
                 changed
+            }
+        }
+    }
+
+    fn assert_concrete(&self, ctx: &HirCtx) {
+        match self {
+            Statement::LetStatement { pattern, type_, initializer } => {
+                assert!(
+                    type_.is_concrete(ctx),
+                    "let statement's type is not concrete"
+                );
+                initializer.assert_concrete(ctx);
+            }
+            Statement::Expression { expression, has_semicolon } => {
+                expression.assert_concrete(ctx)
             }
         }
     }
