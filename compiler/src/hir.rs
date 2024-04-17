@@ -156,9 +156,15 @@ pub struct HirCtx<'a> {
     /// values.
     value_scope: Scope<'a, Symbol, TypeIdx>,
     ty_ctx: Either<&'a mut TyCtx, Box<TyCtx>>,
+    /// If we are currently checking a `FnItem`, this is the `FnItem`'s return
+    /// type (i.e. the type of `a` in `return a`)
+    return_type: Option<TypeIdx>,
+    /// If we are currently inside a `Loop`, this is the `Loop`'s type (i.e.
+    /// the type of `v` in `break v` expressions inside the loop)
+    break_types: Either<&'a mut Vec<TypeIdx>, Box<Vec<TypeIdx>>>,
 }
 
-impl HirCtx<'_> {
+impl<'a> HirCtx<'a> {
     fn prelude() -> Self {
         let (ty_ctx, type_scope) = TyCtx::new();
         let value_scope = Scope::new(None);
@@ -166,6 +172,18 @@ impl HirCtx<'_> {
             type_scope,
             value_scope,
             ty_ctx: Either::Right(Box::new(ty_ctx)),
+            return_type: None,
+            break_types: Either::Right(Box::new(vec![])),
+        }
+    }
+
+    fn new_parent(parent: &'a mut HirCtx<'_>) -> Self {
+        Self {
+            type_scope: Scope::new(Some(&parent.type_scope)),
+            value_scope: Scope::new(Some(&parent.value_scope)),
+            ty_ctx: Either::Left(&mut parent.ty_ctx),
+            return_type: parent.return_type,
+            break_types: Either::Left(&mut parent.break_types),
         }
     }
 
@@ -887,7 +905,7 @@ pub struct MatchArm {
 }
 
 /// Lower ast to hir and type-check it.
-pub fn lower_ast_to_hir(ast: Vec<ast::Item>) -> Vec<Item> {
+pub fn lower_ast_to_hir(ast: Vec<ast::Item>) -> (Vec<Item>, HirCtx<'static>) {
     let mut ctx = HirCtx::prelude();
     let mut hir = ast.lower(&mut ctx);
     ctx.register_globals(&hir);
@@ -930,7 +948,7 @@ pub fn lower_ast_to_hir(ast: Vec<ast::Item>) -> Vec<Item> {
 
     hir.assert_concrete(&ctx);
 
-    hir
+    (hir, ctx)
 }
 
 trait Lower {
@@ -1525,11 +1543,8 @@ impl TypeCheck for Item {
 
 impl TypeCheck for FnItem {
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool {
-        let mut ctx = HirCtx {
-            type_scope: Scope::new(Some(&ctx.type_scope)),
-            value_scope: Scope::new(Some(&ctx.value_scope)),
-            ty_ctx: Either::Left(&mut ctx.ty_ctx),
-        };
+        let mut ctx = HirCtx::new_parent(ctx);
+        ctx.return_type = Some(self.return_type);
         let mut changed = false;
         for param in &self.params {
             match (&param.pattern, &param.type_) {
@@ -1618,7 +1633,9 @@ impl TypeCheck for Expression {
                 }
                 changed
             }
-            ExpressionKind::Tuple(_) => todo!(),
+            ExpressionKind::Tuple(elems) => {
+                todo!();
+            }
             ExpressionKind::UnaryOp { op, operand } => {
                 let mut changed = operand.type_check(ctx);
                 match op {
@@ -1714,7 +1731,12 @@ impl TypeCheck for Expression {
                 }
                 changed
             }
-            ExpressionKind::Loop(body) => body.type_check(ctx),
+            ExpressionKind::Loop(body) => {
+                ctx.break_types.push(self.type_);
+                let changed = body.type_check(ctx);
+                ctx.break_types.pop();
+                changed
+            }
             ExpressionKind::Block(block) => block.type_check(ctx),
             ExpressionKind::Match { scrutinee, arms } => todo!(),
             ExpressionKind::Wildcard => todo!(),
@@ -1726,8 +1748,32 @@ impl TypeCheck for Expression {
                 changed
             }
             ExpressionKind::Call { function, args } => todo!(),
-            ExpressionKind::Break { value } => value.type_check(ctx),
-            ExpressionKind::Return { value } => value.type_check(ctx),
+            ExpressionKind::Break { value } => {
+                let mut changed = value.type_check(ctx);
+                let &expected = ctx
+                    .break_types
+                    .last()
+                    .expect("break expr in non-loop context");
+                match value {
+                    Some(value) => {
+                        changed |= ctx.constrain_eq(expected, value.type_)
+                    }
+                    None => changed |= ctx.constrain_unit(expected),
+                }
+                changed
+            }
+            ExpressionKind::Return { value } => {
+                let mut changed = value.type_check(ctx);
+                let expected =
+                    ctx.return_type.expect("return expr in non-fn context");
+                match value {
+                    Some(value) => {
+                        changed |= ctx.constrain_eq(expected, value.type_)
+                    }
+                    None => changed |= ctx.constrain_unit(expected),
+                }
+                changed
+            }
         }
     }
 

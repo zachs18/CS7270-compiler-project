@@ -1,0 +1,17 @@
+extern fn main() {
+    return;
+//    return ();
+}
+
+fn foo(x: i32) -> i32 {
+    return 3;
+    return 4 + 5;
+    return x;
+}
+
+fn bar(y: i32) -> i32 {
+    return y;
+    loop {
+        break y;
+    }
+}
