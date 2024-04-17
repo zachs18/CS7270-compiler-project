@@ -415,9 +415,12 @@ impl HirCtx<'_> {
             }
             Pattern::Alt(_) => todo!(),
             Pattern::Array(elems) => {
-                let (changed, element) =
+                let (mut changed, elem_ty) =
                     self.constrain_array(type_, elems.len());
-                todo!()
+                for elem in elems {
+                    changed |= self.insert_locals(elem, elem_ty);
+                }
+                changed
             }
             Pattern::Tuple(_) => todo!(),
             Pattern::Range { start, inclusive, end } => todo!(),
@@ -1607,7 +1610,14 @@ impl TypeCheck for Expression {
                 debug_assert!(matches!(self.kind, ExpressionKind::Bool(..)));
                 false
             }
-            ExpressionKind::Array(_) => todo!(),
+            ExpressionKind::Array(elems) => {
+                let (mut changed, elem_ty) =
+                    ctx.constrain_array(self.type_, elems.len());
+                for elem in elems.iter() {
+                    changed |= ctx.constrain_eq(elem.type_, elem_ty);
+                }
+                changed
+            }
             ExpressionKind::Tuple(_) => todo!(),
             ExpressionKind::UnaryOp { op, operand } => {
                 let mut changed = operand.type_check(ctx);
