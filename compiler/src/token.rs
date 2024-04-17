@@ -30,7 +30,7 @@ impl TokenTree {
         }
     }
 
-    pub(crate) fn span(&self) -> Span {
+    pub(crate) fn span(&self) -> Option<Span> {
         match self {
             TokenTree::Ident(ident) => ident.span,
             TokenTree::Group(group) => group.span,
@@ -54,14 +54,46 @@ impl std::fmt::Debug for TokenTree {
 #[derive(Debug, Clone, Copy)]
 pub struct Ident {
     pub ident: &'static str,
-    pub span: Span,
+    pub span: Option<Span>,
+}
+
+impl Ident {
+    pub fn new_unspanned(ident: &'static str) -> Self {
+        Self { ident, span: None }
+    }
+}
+
+impl PartialEq for Ident {
+    fn eq(&self, other: &Self) -> bool {
+        self.ident == other.ident
+    }
+}
+
+impl Eq for Ident {}
+
+impl PartialOrd for Ident {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.ident.partial_cmp(&other.ident)
+    }
+}
+
+impl Ord for Ident {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ident.cmp(other.ident)
+    }
+}
+
+impl std::hash::Hash for Ident {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ident.hash(state);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Group {
     pub delimiter: Delimiter,
     pub inner: Vec<TokenTree>,
-    pub span: Span,
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -92,14 +124,19 @@ impl Delimiter {
 #[derive(Debug, Clone, Copy)]
 pub struct Integer {
     pub value: u128,
-    pub span: Span,
+    pub span: Option<Span>,
+}
+impl Integer {
+    pub fn new_unspanned(value: u128) -> Integer {
+        Self { value, span: None }
+    }
 }
 
 #[derive(Clone, Copy)]
 pub struct Punct {
     pub c: u8,
     pub joint_with_next: bool,
-    pub span: Span,
+    pub span: Option<Span>,
 }
 
 impl std::fmt::Debug for Punct {

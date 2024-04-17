@@ -5,9 +5,11 @@ use token::TokenTree;
 mod ast;
 mod hir;
 mod lexer;
+mod mir;
 mod parser;
 mod span;
 mod token;
+mod util;
 
 fn usage() -> ExitCode {
     println!(
@@ -18,6 +20,8 @@ fn usage() -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    env_logger::init();
+
     let args: Vec<_> = std::env::args().collect();
     let Ok([_, infilename, outfilename]) = <[_; 3]>::try_from(args) else {
         return usage();

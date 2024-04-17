@@ -4,7 +4,7 @@ FILE: ITEM* eof
 
 ITEM: FNITEM | STATICITEM
 
-FNITEM: 'extern'? 'fn' ident '(' list[FN_PARAM] ')' (BLOCK | ';')
+FNITEM: 'extern'? 'fn' ident '(' list[FN_PARAM] '...'? ')' (BLOCK | ';')
 
 STATICITEM: 'extern'? 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
 

@@ -12,3 +12,4 @@ opt-level = 1
 todo = "warn"
 needless_lifetimes = "allow"
 match_like_matches_macro = "allow"
+unnecessary_fold = "allow" # false positive, would change semantics

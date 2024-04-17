@@ -68,7 +68,7 @@ fn lex_until_closing_delimiter(
                 tokens.push(TokenTree::Ident(Ident {
                     ident: std::str::from_utf8(&src[start..idx])
                         .expect("valid UTF-8 source"),
-                    span: (start..idx).into(),
+                    span: Some((start..idx).into()),
                 }));
                 prev_byte_was_punct = false;
             }
@@ -88,7 +88,7 @@ fn lex_until_closing_delimiter(
                     s.parse().expect("overflowing integer literal");
                 tokens.push(TokenTree::Integer(Integer {
                     value,
-                    span: (start..idx).into(),
+                    span: Some((start..idx).into()),
                 }));
                 prev_byte_was_punct = false;
             }
@@ -103,7 +103,7 @@ fn lex_until_closing_delimiter(
                 tokens.push(TokenTree::Punct(Punct {
                     c,
                     joint_with_next: false,
-                    span: (idx..idx + 1).into(),
+                    span: Some((idx..idx + 1).into()),
                 }));
                 prev_byte_was_punct = true;
                 idx += 1;
@@ -121,7 +121,7 @@ fn lex_until_closing_delimiter(
                 tokens.push(TokenTree::Group(Group {
                     delimiter,
                     inner,
-                    span: (idx..end + 1).into(),
+                    span: Some((idx..end + 1).into()),
                 }));
                 idx = end + 1;
             }

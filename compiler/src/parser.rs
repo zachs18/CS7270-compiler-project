@@ -1020,9 +1020,13 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
             opt(preceded(parse_joint_puncts(";"), parse_integer)),
         ))
         .map(|(element, length)| match length {
-            Some(length) => {
-                Type::Array { element: Box::new(element), length: length.value }
-            }
+            Some(length) => Type::Array {
+                element: Box::new(element),
+                length: length
+                    .value
+                    .try_into()
+                    .expect("array length too large"),
+            },
             None => Type::Slice { element: Box::new(element) },
         }),
     );

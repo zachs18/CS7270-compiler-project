@@ -36,7 +36,7 @@ pub struct FnParam {
 #[derive(Debug, Clone)]
 pub enum Type {
     Pointer { mutable: bool, pointee: Box<Type> },
-    Array { element: Box<Type>, length: u128 },
+    Array { element: Box<Type>, length: usize },
     Slice { element: Box<Type> },
     Ident(Ident),
     Tuple(Vec<Type>),
