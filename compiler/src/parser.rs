@@ -19,7 +19,9 @@ use crate::{
         UnaryOp,
     },
     lexer::{self, is_keyword},
-    token::{Delimiter, Group, Ident, Integer, Punct, TokenTree},
+    token::{
+        Delimiter, Group, Ident, Integer, Punct, StringLiteral, TokenTree,
+    },
 };
 
 struct ParseError_<'a> {
@@ -56,6 +58,7 @@ impl fmt::Display for ParseError_<'_> {
                 write!(f, "identifier `{ident}`")?
             }
             Some(TokenTree::Integer(_)) => write!(f, "integer literal")?,
+            Some(TokenTree::StringLiteral(_)) => write!(f, "string literal")?,
             Some(&TokenTree::Punct(Punct { c, .. })) => {
                 write!(f, "`{}`", c as char)?
             }
@@ -738,6 +741,7 @@ fn parse_prefix_unary_expression(
 /// ```text
 /// | integer
 /// | ident
+/// | string
 /// | 'true'
 /// | 'false'
 /// | '_'
@@ -756,12 +760,14 @@ fn parse_prefix_unary_expression(
 /// my_function(42, 7 + 3)
 /// my_function(X, 42)
 /// (*get_ptr(42))[3]
+/// "string literal says \"wow\""
 /// ```
 fn parse_postfix_unary_expression(
     input: &[TokenTree],
 ) -> IResult<'_, Expression> {
     let (input, mut expr) = alt((
         parse_integer.map(Expression::Integer),
+        parse_string_literal.map(Expression::StringLiteral),
         parse_non_kw_ident.map(Expression::Ident),
         parse_ident("_").map(|_| Expression::Wildcard),
         parse_ident("true").map(|_| Expression::Bool(true)),
@@ -943,6 +949,18 @@ fn parse_integer(input: &[TokenTree]) -> IResult<'_, Integer> {
         )));
     };
     Ok((rest, *integer))
+}
+
+/// Any string literal token.
+fn parse_string_literal(input: &[TokenTree]) -> IResult<'_, StringLiteral> {
+    let Some((TokenTree::StringLiteral(string), rest)) = input.split_first()
+    else {
+        return Err(nom::Err::Error(ParseError::from_error_kind(
+            input,
+            ErrorKind::IsA,
+        )));
+    };
+    Ok((rest, *string))
 }
 
 /// Parse a specific sequence of punctuation characters not separated by

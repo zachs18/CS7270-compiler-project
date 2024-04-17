@@ -6,6 +6,7 @@ pub enum TokenTree {
     Group(Group),
     Integer(Integer),
     Punct(Punct),
+    StringLiteral(StringLiteral),
 }
 
 impl TokenTree {
@@ -36,6 +37,7 @@ impl TokenTree {
             TokenTree::Group(group) => group.span,
             TokenTree::Integer(integer) => integer.span,
             TokenTree::Punct(punct) => punct.span,
+            TokenTree::StringLiteral(string) => string.span,
         }
     }
 }
@@ -43,10 +45,11 @@ impl TokenTree {
 impl std::fmt::Debug for TokenTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ident(arg0) => arg0.fmt(f),
-            Self::Group(arg0) => arg0.fmt(f),
-            Self::Integer(arg0) => arg0.fmt(f),
-            Self::Punct(arg0) => arg0.fmt(f),
+            TokenTree::Ident(arg0) => arg0.fmt(f),
+            TokenTree::Group(arg0) => arg0.fmt(f),
+            TokenTree::Integer(arg0) => arg0.fmt(f),
+            TokenTree::Punct(arg0) => arg0.fmt(f),
+            TokenTree::StringLiteral(arg0) => arg0.fmt(f),
         }
     }
 }
@@ -93,6 +96,12 @@ impl std::hash::Hash for Ident {
 pub struct Group {
     pub delimiter: Delimiter,
     pub inner: Vec<TokenTree>,
+    pub span: Option<Span>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StringLiteral {
+    pub data: &'static [u8],
     pub span: Option<Span>,
 }
 

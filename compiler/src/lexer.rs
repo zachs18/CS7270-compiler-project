@@ -1,4 +1,6 @@
-use crate::token::{Delimiter, Group, Ident, Integer, Punct, TokenTree};
+use crate::token::{
+    Delimiter, Group, Ident, Integer, Punct, StringLiteral, TokenTree,
+};
 
 pub fn lex(src: &'static [u8]) -> Vec<TokenTree> {
     let (tokens, end) = lex_until_closing_delimiter(src, 0);
@@ -125,6 +127,44 @@ fn lex_until_closing_delimiter(
                 }));
                 idx = end + 1;
             }
+            Some(b'"') => {
+                prev_byte_was_punct = false;
+                let start = idx;
+                let mut data: Vec<u8> = vec![];
+                idx += 1;
+                while let Some(&c) = src.get(idx) {
+                    if c == b'"' {
+                        break;
+                    } else if c == b'\\' {
+                        idx += 1;
+                        match src.get(idx) {
+                            None => panic!("unterminated string literal"),
+                            Some(b'n') => {
+                                data.push(b'\n');
+                                idx += 1;
+                            }
+                            Some(&c) => panic!(
+                                "unrecognized escape sequence: \\{}",
+                                c as char
+                            ),
+                        }
+                    } else {
+                        data.push(c);
+                        idx += 1;
+                    }
+                }
+                assert_eq!(
+                    src.get(idx),
+                    Some(&b'"'),
+                    "unterminated string literal"
+                );
+                idx += 1;
+                tokens.push(TokenTree::StringLiteral(StringLiteral {
+                    data: Vec::leak(data),
+                    span: Some((start..idx).into()),
+                }))
+            }
+            #[allow(unused_assignments)]
             Some(&c) => {
                 prev_byte_was_punct = false;
                 panic!("invalid character: {}", std::ascii::escape_default(c));

@@ -1,4 +1,4 @@
-use crate::token::{Ident, Integer};
+use crate::token::{Ident, Integer, StringLiteral};
 
 #[derive(Debug)]
 pub enum Item {
@@ -155,6 +155,7 @@ impl BinaryOp {
 pub enum Expression {
     Ident(Ident),
     Integer(Integer),
+    StringLiteral(StringLiteral),
     Bool(bool),
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),

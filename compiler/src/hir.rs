@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 
 use crate::{
     ast::{self, BinaryOp, ComparisonOp, UnaryOp},
-    token::{Ident, Integer},
+    token::{Ident, Integer, StringLiteral},
     util::UnionFind,
 };
 
@@ -733,6 +733,15 @@ impl Expression {
             type_: ctx.ty_ctx.bool_type(),
         }
     }
+    fn string_literal(string: StringLiteral, ctx: &mut HirCtx) -> Expression {
+        let i8 = ctx.ty_ctx.insert_type(TypeKind::Integer {
+            signed: true,
+            bits: Either::Left(8),
+        });
+        let const_i8_ptr = TypeKind::Pointer { mutable: false, pointee: i8 };
+        let type_ = ctx.ty_ctx.insert_type(const_i8_ptr);
+        Expression { kind: ExpressionKind::StringLiteral(string), type_ }
+    }
     fn break_expr(
         value: Option<Box<Expression>>, ctx: &mut HirCtx,
     ) -> Expression {
@@ -755,6 +764,7 @@ impl Expression {
 pub enum ExpressionKind {
     Ident(Symbol),
     Integer(Integer),
+    StringLiteral(StringLiteral),
     Bool(bool),
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),
@@ -1009,6 +1019,9 @@ impl Lower for ast::Expression {
             }
             ast::Expression::Integer(integer) => {
                 Expression::integer(integer, ctx)
+            }
+            ast::Expression::StringLiteral(string_literal) => {
+                Expression::string_literal(string_literal, ctx)
             }
             ast::Expression::Bool(b) => Expression::bool(b, ctx),
             ast::Expression::Array(exprs) => {
@@ -1516,7 +1529,18 @@ impl TypeCheck for Expression {
                 };
                 ctx.constrain_eq(*type_, self.type_)
             }
-            ExpressionKind::Integer(_) => ctx.constrain_integer(self.type_),
+            ExpressionKind::StringLiteral(_) => {
+                // string literal expressions should already be created as
+                // `*const i8` type
+                assert!(self.type_.is_pointer(ctx).is_some_and(|is| is));
+                false
+            }
+            ExpressionKind::Integer(_) => {
+                // integer expressions should already be created as integer type
+                // var
+                assert!(self.type_.is_integer(ctx).is_some_and(|is| is));
+                false
+            }
             ExpressionKind::Bool(_) => {
                 debug_assert!(matches!(self.kind, ExpressionKind::Bool(..)));
                 false
@@ -1617,6 +1641,7 @@ impl TypeCheck for Expression {
         match &self.kind {
             ExpressionKind::Ident(..)
             | ExpressionKind::Integer(..)
+            | ExpressionKind::StringLiteral(..)
             | ExpressionKind::Bool(..) => {}
             ExpressionKind::Array(elems) => elems.assert_concrete(ctx),
             ExpressionKind::Tuple(elems) => elems.assert_concrete(ctx),

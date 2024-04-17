@@ -93,6 +93,7 @@ PREFIX_UNARY_EXPR:
 POSTFIX_UNARY_EXPR:
  | integer
  | ident
+ | string
  | 'true'
  | 'false'
  | '_'
