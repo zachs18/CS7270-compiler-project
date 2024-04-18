@@ -101,8 +101,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
             }
         }
     }
-    dbg!(&compilation_unit);
-    todo!()
+    compilation_unit
 }
 
 #[derive(Debug)]
@@ -274,14 +273,52 @@ impl Body {
         initializer: &hir::Expression, ctx: &HirCtx,
         compilation_unit: &mut CompilationUnit,
     ) -> Self {
-        todo!()
+        let return_type = compilation_unit.lower_type(initializer.type_, ctx);
+
+        // The initial BasicBlock. This will be overwritten with a Goto
+        // terminator for the initializer expression's initial block.
+        let initial_block = BasicBlock {
+            operations: vec![],
+            terminator: Terminator::Unreachable,
+        };
+        // The terminal BasicBlock. This is given as the destimation block when
+        // lowering the imitializer expression.
+        let terminal_block =
+            BasicBlock { operations: vec![], terminator: Terminator::Return };
+        let mut this = Body {
+            slots: vec![return_type],
+            basic_blocks: vec![initial_block, terminal_block],
+        };
+        // SlotIdx(0) is always the return value
+        let initial_block_idx = lower_expression(
+            initializer,
+            ctx,
+            SlotIdx(0),
+            &mut this,
+            BasicBlockIdx(1),
+            compilation_unit,
+        );
+        this.basic_blocks[0].terminator =
+            Terminator::Goto { target: initial_block_idx };
+        this
     }
+
     fn new_for_fn(
         body: &hir::Expression, ctx: &HirCtx, args: &[hir::FnParam],
         compilation_unit: &mut CompilationUnit,
     ) -> Self {
         todo!()
     }
+}
+
+/// Lowers an expression into BasicBlocks
+///
+/// Returns the initial BasicBlockIdx
+fn lower_expression(
+    expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    todo!()
 }
 
 /// Index into Body::slots
@@ -307,6 +344,13 @@ enum Terminator {
         scrutinee: SlotIdx,
         true_dst: BasicBlockIdx,
         false_dst: BasicBlockIdx,
+    },
+    SwitchCmp {
+        lhs: SlotIdx,
+        rhs: SlotIdx,
+        less_dst: BasicBlockIdx,
+        equal_dst: BasicBlockIdx,
+        greater_dst: BasicBlockIdx,
     },
     Return,
     Unreachable,
