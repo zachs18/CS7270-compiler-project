@@ -160,6 +160,18 @@ fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
     ))(input)
 }
 
+#[test]
+fn simple_statics() {
+    let tokens = crate::lexer::lex(b"extern static X: u32;");
+    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+
+    let tokens = crate::lexer::lex(b"extern static X: u32 = 42;");
+    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+
+    let tokens = crate::lexer::lex(b"static X: u32 = 42;");
+    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+}
+
 fn parse_group<
     'a,
     E: ParseError<&'a [TokenTree]>,
@@ -1078,7 +1090,7 @@ fn parse_type(input: &[TokenTree]) -> IResult<'_, Type> {
 /// static mut COUNTER: u64 = 0;
 /// ```
 fn parse_static_item(input: &[TokenTree]) -> IResult<'_, StaticItem> {
-    let (input, extern_token) = opt(parse_ident("static"))(input)?;
+    let (input, extern_token) = opt(parse_ident("extern"))(input)?;
     let (input, static_token) = parse_ident("static")(input)?;
     let (input, mut_token) = opt(parse_ident("mut"))(input)?;
     let (input, name) = parse_non_kw_ident(input)?;
