@@ -69,9 +69,13 @@ fn main() -> ExitCode {
 
     dbg!(&items);
 
-    let hir = hir::lower_ast_to_hir(items);
+    let (hir, hir_ctx) = hir::lower_ast_to_hir(items);
 
     dbg!(&hir);
+
+    let mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
+
+    dbg!(&mir);
 
     ExitCode::SUCCESS
 }

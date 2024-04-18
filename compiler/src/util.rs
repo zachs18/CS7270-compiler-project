@@ -1,4 +1,9 @@
-use std::{borrow::Borrow, cell::Cell, collections::HashMap, hash::Hash};
+use std::{
+    borrow::Borrow,
+    cell::Cell,
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
+};
 
 #[derive(Default)]
 pub struct UnionFind {
@@ -70,6 +75,7 @@ impl UnionFind {
     }
 }
 
+#[derive(Debug)]
 pub struct Scope<'parent, Key: Eq + Hash, Value> {
     parent: Option<&'parent Scope<'parent, Key, Value>>,
     this_scope: HashMap<Key, Value>,
@@ -98,13 +104,18 @@ where
         Self { parent, this_scope: Default::default() }
     }
 
-    pub fn insert_replace(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.this_scope.insert(key, value)
     }
 
-    pub fn insert(&mut self, key: K, value: V) {
-        let old_value = self.this_scope.insert(key, value);
-        assert!(old_value.is_none(), "attempted to insert duplicate");
+    pub fn insert_noreplace(&mut self, key: K, value: V) -> Option<V> {
+        match self.this_scope.entry(key) {
+            Entry::Occupied(..) => Some(value),
+            Entry::Vacant(entry) => {
+                entry.insert(value);
+                None
+            }
+        }
     }
 }
 

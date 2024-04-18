@@ -177,6 +177,11 @@ impl<'a> HirCtx<'a> {
         }
     }
 
+    /// Returns `None` if the given `TypeIdx` is not a concrete type.
+    pub fn resolve_ty(&self, ty: TypeIdx) -> Option<&TypeKind> {
+        self.ty_ctx.substitutions.get(ty.0).and_then(|e| e.as_ref().left())
+    }
+
     fn new_parent(parent: &'a mut HirCtx<'_>) -> Self {
         Self {
             type_scope: Scope::new(Some(&parent.type_scope)),
@@ -192,14 +197,14 @@ impl<'a> HirCtx<'a> {
             let name = item.name();
             let type_ = item.type_();
             assert!(type_.is_concrete(self), "item type must be concrete");
-            if self.value_scope.insert_replace(name, type_).is_some() {
+            if self.value_scope.insert_noreplace(name, type_).is_some() {
                 panic!("duplicate item {:?}", item);
             }
         }
     }
 
     fn register_local(&mut self, name: Symbol, type_: TypeIdx) {
-        if self.value_scope.insert_replace(name, type_).is_some() {
+        if self.value_scope.insert_noreplace(name, type_).is_some() {
             panic!("duplicate local {:?}", name);
         }
     }
@@ -511,10 +516,10 @@ impl<'a> HirCtx<'a> {
                 self.constrain_integer(type_)
             }
             Pattern::Ident { ident, .. } => {
-                self.value_scope.insert(*ident, type_);
+                self.value_scope.insert_noreplace(*ident, type_);
                 false
             }
-            Pattern::Alt(_) => todo!(),
+            Pattern::Alt(_) => unimplemented!("alt patterns not implemented"),
             Pattern::Array(elems) => {
                 let (mut changed, elem_ty) =
                     self.constrain_array(type_, elems.len());
@@ -674,7 +679,7 @@ impl Item {
         }
     }
 
-    fn name(&self) -> Symbol {
+    pub fn name(&self) -> Symbol {
         match self {
             Item::FnItem(fn_item) => fn_item.name,
             Item::StaticItem(static_item) => static_item.name,
@@ -1613,7 +1618,9 @@ impl TypeCheck for FnItem {
                 (Pattern::Integer(_), _) => {
                     panic!("non-exaustive pattern in fn arg")
                 }
-                (Pattern::Alt(_), _) => todo!(),
+                (Pattern::Alt(_), _) => {
+                    unimplemented!("alt patterns not implemented")
+                }
                 // (Pattern::Array(_), TypeKind::Array { .. }) => todo!(),
                 // (Pattern::Tuple(_), TypeKind::Tuple(_)) => todo!(),
                 (Pattern::Range { .. }, _) => {
