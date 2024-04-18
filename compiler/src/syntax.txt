@@ -41,13 +41,13 @@ LET_STATEMENT: 'let' PATTERN ( ':' TYPE )? ( '=' EXPRESSION )? ';'
 EXPRESSION: EXPR_BLOCK | EXPR_NO_BLOCK
 
 EXPR_NO_BLOCK:
- | `break` EXPR_NO_BLOCK?
+ | `break` label EXPR_NO_BLOCK?
  | `return` EXPR_NO_BLOCK?
  | OPERATOR_EXPRESSION
 // TODO: other expressions
 
 EXPR_BLOCK:
- | BLOCK
+ | BLOCK_LABEL? BLOCK
  | IF_EXPR
  | MATCH_EXPR
  | LOOP_EXPR
@@ -59,9 +59,11 @@ MATCH_EXPR: 'match' EXPR_NO_BLOCK '{' list[MATCH_ARM] '}'
 MATCH_ARM: PATTERN_WITH_ALT '=>' EXPRESSION
 
 LOOP_EXPR:
- | 'while' EXPR_NO_BLOCK BLOCK
- | 'for' PATTERN 'in' EXPR_NO_BLOCK BLOCK
- | 'loop' BLOCK
+ | BLOCK_LABEL? 'while' EXPR_NO_BLOCK BLOCK
+ | BLOCK_LABEL? 'for' PATTERN 'in' EXPR_NO_BLOCK BLOCK
+ | BLOCK_LABEL? 'loop' BLOCK
+
+BLOCK_LABEL: label ':'
 
 // Note: operator precedence is handled later (not in the syntax itself)
 OPERATOR_EXPRESSION:
@@ -101,3 +103,5 @@ POSTFIX_UNARY_EXPR:
  | '[' list[EXPRESSION] ']'
  | POSTFIX_UNARY_EXPR '[' EXPRESSION ']'
  | POSTFIX_UNARY_EXPR '(' list[EXPRESSION] ')'
+
+label = basically an ident, but starts with '

@@ -7,6 +7,7 @@ pub enum TokenTree {
     Integer(Integer),
     Punct(Punct),
     StringLiteral(StringLiteral),
+    Label(Label),
 }
 
 impl TokenTree {
@@ -38,6 +39,7 @@ impl TokenTree {
             TokenTree::Integer(integer) => integer.span,
             TokenTree::Punct(punct) => punct.span,
             TokenTree::StringLiteral(string) => string.span,
+            TokenTree::Label(label) => label.span,
         }
     }
 }
@@ -50,6 +52,7 @@ impl std::fmt::Debug for TokenTree {
             TokenTree::Integer(arg0) => arg0.fmt(f),
             TokenTree::Punct(arg0) => arg0.fmt(f),
             TokenTree::StringLiteral(arg0) => arg0.fmt(f),
+            TokenTree::Label(arg0) => arg0.fmt(f),
         }
     }
 }
@@ -89,6 +92,44 @@ impl Ord for Ident {
 impl std::hash::Hash for Ident {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ident.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Label {
+    pub label: &'static str,
+    pub span: Option<Span>,
+}
+
+impl Label {
+    pub fn new_unspanned(label: &'static str) -> Self {
+        Self { label, span: None }
+    }
+}
+
+impl PartialEq for Label {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label
+    }
+}
+
+impl Eq for Label {}
+
+impl PartialOrd for Label {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Label {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.label.cmp(other.label)
+    }
+}
+
+impl std::hash::Hash for Label {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.label.hash(state);
     }
 }
 

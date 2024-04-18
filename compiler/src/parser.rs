@@ -20,7 +20,8 @@ use crate::{
     },
     lexer::{self, is_keyword},
     token::{
-        Delimiter, Group, Ident, Integer, Punct, StringLiteral, TokenTree,
+        Delimiter, Group, Ident, Integer, Label, Punct, StringLiteral,
+        TokenTree,
     },
 };
 
@@ -56,6 +57,9 @@ impl fmt::Display for ParseError_<'_> {
             }
             Some(TokenTree::Ident(Ident { ident, .. })) => {
                 write!(f, "identifier `{ident}`")?
+            }
+            Some(TokenTree::Label(Label { label, .. })) => {
+                write!(f, "label `{label}`")?
             }
             Some(TokenTree::Integer(_)) => write!(f, "integer literal")?,
             Some(TokenTree::StringLiteral(_)) => write!(f, "string literal")?,
@@ -163,13 +167,13 @@ fn parse_item(input: &[TokenTree]) -> IResult<'_, Item> {
 #[test]
 fn simple_statics() {
     let tokens = crate::lexer::lex(b"extern static X: u32;");
-    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+    let _items = all_consuming(parse_static_item)(&tokens).unwrap();
 
     let tokens = crate::lexer::lex(b"extern static X: u32 = 42;");
-    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+    let _items = all_consuming(parse_static_item)(&tokens).unwrap();
 
     let tokens = crate::lexer::lex(b"static X: u32 = 42;");
-    let items = all_consuming(parse_static_item)(&tokens).unwrap();
+    let _items = all_consuming(parse_static_item)(&tokens).unwrap();
 }
 
 fn parse_group<
@@ -272,6 +276,21 @@ fn atom_expr() {
     assert!(parse_block(&tokens).is_ok());
 }
 
+fn parse_label(input: &[TokenTree]) -> IResult<'_, Label> {
+    let Some((&TokenTree::Label(label), rest)) = input.split_first() else {
+        return Err(nom::Err::Error(ParseError::from_error_kind(
+            input,
+            ErrorKind::IsA,
+        )))
+        .or_expected("label");
+    };
+    Ok((rest, label))
+}
+
+fn parse_block_label(input: &[TokenTree]) -> IResult<'_, Label> {
+    terminated(parse_label, parse_joint_puncts(":"))(input)
+}
+
 /// A block containing [statements](parse_statement) and an optional trailing
 /// [expression](parse_expression).
 ///
@@ -351,7 +370,8 @@ fn parse_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// expression](parse_match_expression).
 fn parse_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((
-        parse_block.map(Expression::Block),
+        pair(opt(parse_block_label), parse_block)
+            .map(|(label, body)| Expression::Block { label, body }),
         parse_if_expression,
         parse_loop_expression,
         parse_match_expression,
@@ -436,9 +456,11 @@ fn parse_loop_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// while i < 42 { i += 1; }
 /// ```
 fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, label) = opt(parse_block_label)(input)?;
     let (input, _) = parse_ident("while")(input)?;
     let tail = tuple((parse_no_block_expression, parse_block)).map(
-        |(condition, body)| Expression::While {
+        move |(condition, body)| Expression::While {
+            label,
             condition: Box::new(condition),
             body,
         },
@@ -466,6 +488,7 @@ fn parse_while_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// for i in 0..10 {}
 /// ```
 fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, label) = opt(parse_block_label)(input)?;
     let (input, _) = parse_ident("for")(input)?;
     let tail = tuple((
         parse_pattern,
@@ -473,10 +496,11 @@ fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
         parse_no_block_expression,
         parse_block,
     ))
-    .map(|(pattern, _, iterable, body)| Expression::For {
+    .map(move |(pattern, _, iterable, body)| Expression::For {
+        label,
         pattern,
         iterable: Box::new(iterable),
-        body: Box::new(Expression::Block(body)),
+        body: Box::new(Expression::Block { label: None, body }),
     });
     // Cut because we already saw a `for` token, so we know this is a for
     // loop.
@@ -500,8 +524,9 @@ fn parse_for_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
 /// }
 /// ```
 fn parse_loop_loop(input: &[TokenTree]) -> IResult<'_, Expression> {
+    let (input, label) = opt(parse_block_label)(input)?;
     let (input, _) = parse_ident("loop")(input)?;
-    let tail = parse_block.map(Expression::Loop);
+    let tail = parse_block.map(move |body| Expression::Loop { label, body });
     // Cut because we already saw a `loop` token, so we know this is a loop.
     cut(tail)(input)
 }
@@ -628,8 +653,14 @@ fn fixup_binary_operators(
 /// TODO: docs
 fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
     alt((
-        preceded(parse_ident("break"), opt(parse_no_block_expression))
-            .map(|expr| Expression::Break { value: expr.map(Box::new) }),
+        preceded(
+            parse_ident("break"),
+            pair(opt(parse_label), opt(parse_no_block_expression)),
+        )
+        .map(|(label, expr)| Expression::Break {
+            label,
+            value: expr.map(Box::new),
+        }),
         preceded(parse_ident("return"), opt(parse_no_block_expression))
             .map(|expr| Expression::Return { value: expr.map(Box::new) }),
         parse_operator_expression,

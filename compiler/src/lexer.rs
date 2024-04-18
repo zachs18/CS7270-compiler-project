@@ -1,5 +1,5 @@
 use crate::token::{
-    Delimiter, Group, Ident, Integer, Punct, StringLiteral, TokenTree,
+    Delimiter, Group, Ident, Integer, Label, Punct, StringLiteral, TokenTree,
 };
 
 pub fn lex(src: &'static [u8]) -> Vec<TokenTree> {
@@ -163,6 +163,24 @@ fn lex_until_closing_delimiter(
                     data: Vec::leak(data),
                     span: Some((start..idx).into()),
                 }))
+            }
+            Some(b'\'') => {
+                let start = idx;
+                idx += 1;
+                if src.get(idx).is_some_and(|&c| is_ident_start(c)) {
+                    idx += 1;
+                } else {
+                    panic!("unexpected label start: {:?}", &src[idx..]);
+                }
+                while src.get(idx).is_some_and(|&c| is_ident_continue(c)) {
+                    idx += 1;
+                }
+                tokens.push(TokenTree::Label(Label {
+                    label: std::str::from_utf8(&src[start..idx])
+                        .expect("valid UTF-8 source"),
+                    span: Some((start..idx).into()),
+                }));
+                prev_byte_was_punct = false;
             }
             #[allow(unused_assignments)]
             Some(&c) => {

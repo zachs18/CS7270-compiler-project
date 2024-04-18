@@ -1,4 +1,4 @@
-use crate::token::{Ident, Integer, StringLiteral};
+use crate::token::{Ident, Integer, Label, StringLiteral};
 
 #[derive(Debug)]
 pub enum Item {
@@ -178,16 +178,24 @@ pub enum Expression {
         blocks: Vec<Block>,
     },
     While {
+        label: Option<Label>,
         condition: Box<Expression>,
         body: Block,
     },
     For {
+        label: Option<Label>,
         pattern: Pattern,
         iterable: Box<Expression>,
         body: Box<Expression>,
     },
-    Loop(Block),
-    Block(Block),
+    Loop {
+        label: Option<Label>,
+        body: Block,
+    },
+    Block {
+        label: Option<Label>,
+        body: Block,
+    },
     Match {
         scrutinee: Box<Expression>,
         arms: Vec<MatchArm>,
@@ -202,6 +210,7 @@ pub enum Expression {
         args: Vec<Expression>,
     },
     Break {
+        label: Option<Label>,
         value: Option<Box<Expression>>,
     },
     Return {

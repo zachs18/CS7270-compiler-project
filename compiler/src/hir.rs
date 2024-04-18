@@ -1228,7 +1228,8 @@ impl Lower for ast::Expression {
                 }
                 expr
             }
-            ast::Expression::While { condition, body } => {
+            ast::Expression::While { label, condition, body } => {
+                todo!("handle label");
                 // loop {
                 //     if condition { break } else body
                 // }
@@ -1253,7 +1254,8 @@ impl Lower for ast::Expression {
                     ctx,
                 )
             }
-            ast::Expression::For { pattern, iterable, body } => {
+            ast::Expression::For { label, pattern, iterable, body } => {
+                todo!("handle labels");
                 // {
                 //     let start = start;
                 //     let end = end;
@@ -1411,11 +1413,13 @@ impl Lower for ast::Expression {
                     ctx,
                 )
             }
-            ast::Expression::Loop(body) => {
+            ast::Expression::Loop { label, body } => {
+                todo!("handle labels");
                 Expression::loop_expr(body.lower(ctx), ctx)
             }
-            ast::Expression::Block(block) => {
-                Expression::block(block.lower(ctx), ctx)
+            ast::Expression::Block { label, body } => {
+                todo!("handle labels");
+                Expression::block(body.lower(ctx), ctx)
             }
             ast::Expression::Match { scrutinee, arms } => {
                 Expression::match_expr(
@@ -1431,7 +1435,8 @@ impl Lower for ast::Expression {
             ast::Expression::Call { function, args } => {
                 Expression::call(function.lower(ctx), args.lower(ctx), ctx)
             }
-            ast::Expression::Break { value } => {
+            ast::Expression::Break { label, value } => {
+                todo!("handle labels");
                 Expression::break_expr(value.lower(ctx), ctx)
             }
             ast::Expression::Return { value } => {
