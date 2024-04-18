@@ -1,0 +1,7 @@
+static mut COUNTER: usize = 0;
+
+extern fn count() -> usize {
+    let prev = COUNTER;
+    COUNTER = prev + 1;
+    prev
+}
