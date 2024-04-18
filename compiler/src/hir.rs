@@ -298,12 +298,20 @@ impl<'a> HirCtx<'a> {
                     false
                 }
                 (
-                    &TypeKind::Function { params: ref p1s, return_type: r1 },
-                    &TypeKind::Function { params: ref p2s, return_type: r2 },
+                    &TypeKind::Function {
+                        params: ref p1s,
+                        return_type: r1,
+                        ..
+                    },
+                    &TypeKind::Function {
+                        params: ref p2s,
+                        return_type: r2,
+                        ..
+                    },
                 ) => {
                     if p1s.len() != p2s.len() {
                         panic!(
-                            "cannot resolve {}-length tuple == {}-length tuple",
+                            "cannot resolve {}-arg fn == {}-arg fn",
                             p1s.len(),
                             p2s.len()
                         );
@@ -396,6 +404,38 @@ impl<'a> HirCtx<'a> {
         }
     }
 
+    /// Returns `true` in the first tuple element if a new constraint was added.
+    ///
+    /// Returns the `TypeIdx`s of the tuple element types in the second tuple
+    /// element.
+    fn constrain_tuple(
+        &mut self, ty: TypeIdx, length: usize,
+    ) -> (bool, Arc<[TypeIdx]>) {
+        match self.ty_ctx.substitutions[ty.0] {
+            Either::Right(TypeVarKind::Normal) => {
+                let elements = Arc::from_iter(
+                    std::iter::repeat_with(|| self.ty_ctx.new_var())
+                        .take(length),
+                );
+                self.ty_ctx.substitutions[ty.0] =
+                    Either::Left(TypeKind::Tuple(elements.clone()));
+                (true, elements)
+            }
+            Either::Left(TypeKind::Tuple(ref elements)) => {
+                assert_eq!(
+                    length,
+                    elements.len(),
+                    "cannot resolve {length}-length tuple == {}-length tuple",
+                    elements.len()
+                );
+                (false, elements.clone())
+            }
+            ref t => {
+                panic!("cannot resolve {length}-length tuple == {t:?}")
+            }
+        }
+    }
+
     /// Returns `true` if a new constraint or substitution was added.
     fn constrain_bool(&mut self, ty: TypeIdx) -> bool {
         match self.ty_ctx.substitutions[ty.0] {
@@ -405,6 +445,45 @@ impl<'a> HirCtx<'a> {
             }
             Either::Left(TypeKind::Bool) => false,
             ref t => panic!("cannot resolve bool == {t:?}"),
+        }
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    ///
+    /// Returns the argument types and return type. Note that the argument types
+    /// may be shorter than `argc` if the fn is variadic.
+    ///
+    /// Note: issues may occur if inference decides that a fn is not variadic
+    /// when it should be, but hypothetically this shouldn't happen.
+    fn constrain_fn(
+        &mut self, ty: TypeIdx, argc: usize,
+    ) -> (bool, Arc<[TypeIdx]>, TypeIdx) {
+        match self.ty_ctx.substitutions[ty.0] {
+            Either::Right(TypeVarKind::Normal) => {
+                let args = Arc::from_iter(
+                    std::iter::repeat_with(|| self.ty_ctx.new_var()).take(argc),
+                );
+                let return_type = self.ty_ctx.new_var();
+                self.ty_ctx.substitutions[ty.0] =
+                    Either::Left(TypeKind::Function {
+                        params: args.clone(),
+                        return_type,
+                        is_variadic: false,
+                    });
+                (true, args, return_type)
+            }
+            Either::Left(TypeKind::Function {
+                ref params,
+                return_type,
+                is_variadic,
+            }) if params.len() == argc
+                || (params.len() <= argc && is_variadic) =>
+            {
+                (false, params.clone(), return_type)
+            }
+            ref t => {
+                panic!("cannot resolve fn({argc} args) -> {{unknown}} == {t:?}")
+            }
         }
     }
 
@@ -423,10 +502,14 @@ impl<'a> HirCtx<'a> {
         }
     }
 
-    fn insert_locals(&mut self, pattern: &Pattern, type_: TypeIdx) -> bool {
+    fn type_check_and_insert_locals(
+        &mut self, pattern: &Pattern, type_: TypeIdx,
+    ) -> bool {
         match pattern {
             Pattern::Wildcard => false,
-            Pattern::Integer(_) => todo!(),
+            Pattern::Integer(_) | Pattern::Range { .. } => {
+                self.constrain_integer(type_)
+            }
             Pattern::Ident { ident, .. } => {
                 self.value_scope.insert(*ident, type_);
                 false
@@ -436,12 +519,18 @@ impl<'a> HirCtx<'a> {
                 let (mut changed, elem_ty) =
                     self.constrain_array(type_, elems.len());
                 for elem in elems {
-                    changed |= self.insert_locals(elem, elem_ty);
+                    changed |= self.type_check_and_insert_locals(elem, elem_ty);
                 }
                 changed
             }
-            Pattern::Tuple(_) => todo!(),
-            Pattern::Range { start, inclusive, end } => todo!(),
+            Pattern::Tuple(elems) => {
+                let (mut changed, elem_tys) =
+                    self.constrain_tuple(type_, elems.len());
+                for (elem, &elem_ty) in std::iter::zip(elems, elem_tys.iter()) {
+                    changed |= self.type_check_and_insert_locals(elem, elem_ty);
+                }
+                changed
+            }
         }
     }
 
@@ -672,7 +761,7 @@ pub enum TypeKind {
     Bool,
     Tuple(Arc<[TypeIdx]>),
     Never,
-    Function { params: Arc<[TypeIdx]>, return_type: TypeIdx },
+    Function { params: Arc<[TypeIdx]>, return_type: TypeIdx, is_variadic: bool },
 }
 
 impl TypeIdx {
@@ -689,7 +778,7 @@ impl TypeIdx {
                     types.iter().all(|type_idx| type_idx.is_concrete(ctx))
                 }
                 TypeKind::Never => true,
-                TypeKind::Function { params, return_type } => {
+                TypeKind::Function { params, return_type, .. } => {
                     return_type.is_concrete(ctx)
                         && params
                             .iter()
@@ -1000,7 +1089,11 @@ impl Lower for ast::FnItem {
         let body = self.body.lower(ctx);
         let param_idxs = params.iter().map(|param| param.type_).collect();
         let return_type = return_type.unwrap_or(ctx.ty_ctx.unit_type());
-        let signature = TypeKind::Function { params: param_idxs, return_type };
+        let signature = TypeKind::Function {
+            params: param_idxs,
+            return_type,
+            is_variadic: self.is_variadic,
+        };
         let signature = ctx.ty_ctx.insert_type(signature);
         FnItem {
             extern_token: self.extern_token,
@@ -1634,7 +1727,14 @@ impl TypeCheck for Expression {
                 changed
             }
             ExpressionKind::Tuple(elems) => {
-                todo!();
+                let mut changed = elems.type_check(ctx);
+                let (c, elem_tys) =
+                    ctx.constrain_tuple(self.type_, elems.len());
+                changed |= c;
+                for (elem, &elem_ty) in std::iter::zip(elems, elem_tys.iter()) {
+                    changed |= ctx.constrain_eq(elem.type_, elem_ty);
+                }
+                changed
             }
             ExpressionKind::UnaryOp { op, operand } => {
                 let mut changed = operand.type_check(ctx);
@@ -1747,7 +1847,23 @@ impl TypeCheck for Expression {
                     ctx.constrain_index(base.type_, index.type_, self.type_);
                 changed
             }
-            ExpressionKind::Call { function, args } => todo!(),
+            ExpressionKind::Call { function, args } => {
+                let mut changed = function.type_check(ctx);
+                changed |= args.type_check(ctx);
+
+                let (c, param_tys, ret_ty) =
+                    ctx.constrain_fn(function.type_, args.len());
+                changed |= c;
+
+                changed |= ctx.constrain_eq(ret_ty, self.type_);
+                for (&param_ty, arg) in
+                    std::iter::zip(param_tys.iter(), args.iter())
+                {
+                    changed |= ctx.constrain_eq(param_ty, arg.type_);
+                }
+
+                changed
+            }
             ExpressionKind::Break { value } => {
                 let mut changed = value.type_check(ctx);
                 let &expected = ctx
@@ -1846,7 +1962,7 @@ impl TypeCheck for Statement {
                 if let Some(expr) = initializer {
                     changed |= ctx.constrain_eq(*type_, expr.type_);
                 }
-                ctx.insert_locals(&*pattern, *type_);
+                ctx.type_check_and_insert_locals(&*pattern, *type_);
                 changed
             }
             Statement::Expression { expression, has_semicolon } => {
