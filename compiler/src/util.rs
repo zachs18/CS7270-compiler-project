@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::{borrow::Borrow, cell::Cell, collections::HashMap, hash::Hash};
 
 #[derive(Default)]
 pub struct UnionFind {
@@ -67,6 +67,44 @@ impl UnionFind {
 
     pub fn new() -> UnionFind {
         Self { parents: vec![] }
+    }
+}
+
+pub struct Scope<'parent, Key: Eq + Hash, Value> {
+    parent: Option<&'parent Scope<'parent, Key, Value>>,
+    this_scope: HashMap<Key, Value>,
+}
+
+impl<'a, K, V> Scope<'a, K, V>
+where
+    K: Eq + Hash,
+{
+    pub fn lookup<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Hash + Eq,
+    {
+        let mut this = self;
+        loop {
+            if let Some(value) = this.this_scope.get(key) {
+                return Some(value);
+            }
+            let parent = this.parent?;
+            this = parent;
+        }
+    }
+
+    pub fn new(parent: Option<&'a Scope<'a, K, V>>) -> Scope<'a, K, V> {
+        Self { parent, this_scope: Default::default() }
+    }
+
+    pub fn insert_replace(&mut self, key: K, value: V) -> Option<V> {
+        self.this_scope.insert(key, value)
+    }
+
+    pub fn insert(&mut self, key: K, value: V) {
+        let old_value = self.this_scope.insert(key, value);
+        assert!(old_value.is_none(), "attempted to insert duplicate");
     }
 }
 

@@ -23,7 +23,7 @@ use once_cell::sync::Lazy;
 use crate::{
     ast::{self, BinaryOp, ComparisonOp},
     token::{Ident, Integer, StringLiteral},
-    util::UnionFind,
+    util::{Scope, UnionFind},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,14 +192,14 @@ impl<'a> HirCtx<'a> {
             let name = item.name();
             let type_ = item.type_();
             assert!(type_.is_concrete(self), "item type must be concrete");
-            if self.value_scope.this_scope.insert(name, type_).is_some() {
+            if self.value_scope.insert_replace(name, type_).is_some() {
                 panic!("duplicate item {:?}", item);
             }
         }
     }
 
     fn register_local(&mut self, name: Symbol, type_: TypeIdx) {
-        if self.value_scope.this_scope.insert(name, type_).is_some() {
+        if self.value_scope.insert_replace(name, type_).is_some() {
             panic!("duplicate local {:?}", name);
         }
     }
@@ -635,41 +635,6 @@ impl<'a> HirCtx<'a> {
         }
 
         changed
-    }
-}
-
-struct Scope<'parent, Key, Value> {
-    parent: Option<&'parent Scope<'parent, Key, Value>>,
-    this_scope: HashMap<Key, Value>,
-}
-
-impl<'a, K: Eq + Hash, V> Scope<'a, K, V> {
-    fn lookup<Q>(&self, key: &Q) -> Option<&V>
-    where
-        K: Borrow<Q>,
-        Q: ?Sized + Hash + Eq,
-    {
-        let mut this = self;
-        loop {
-            if let Some(value) = this.this_scope.get(key) {
-                return Some(value);
-            }
-            let parent = this.parent?;
-            this = parent;
-        }
-    }
-
-    fn new(parent: Option<&'a Scope<'a, K, V>>) -> Scope<'a, K, V> {
-        Self { parent, this_scope: Default::default() }
-    }
-
-    fn insert_replace(&mut self, key: K, value: V) -> Option<V> {
-        self.this_scope.insert(key, value)
-    }
-
-    fn insert(&mut self, key: K, value: V) {
-        let old_value = self.this_scope.insert(key, value);
-        assert!(old_value.is_none(), "attempted to insert duplicate");
     }
 }
 
