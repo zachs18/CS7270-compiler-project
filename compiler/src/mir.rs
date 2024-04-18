@@ -196,7 +196,9 @@ impl CompilationUnit {
                 };
                 self.insert_type(tk)
             }
-            &hir::TypeKind::Slice { element } => todo!(),
+            &hir::TypeKind::Slice { .. } => {
+                unimplemented!("slice types not implemented")
+            }
             &hir::TypeKind::Integer { signed, bits } => {
                 self.integer_type(signed, bits)
             }
@@ -289,12 +291,15 @@ impl Body {
             slots: vec![return_type],
             basic_blocks: vec![initial_block, terminal_block],
         };
+
+        let mut values: Scope<Symbol, SlotIdx> = Scope::new(None);
         // SlotIdx(0) is always the return value
         let initial_block_idx = lower_expression(
             initializer,
             ctx,
             SlotIdx(0),
             &mut this,
+            &mut values,
             BasicBlockIdx(1),
             compilation_unit,
         );
@@ -309,6 +314,39 @@ impl Body {
     ) -> Self {
         todo!()
     }
+
+    fn insert_block(&mut self, block: BasicBlock) -> BasicBlockIdx {
+        let idx = self.basic_blocks.len();
+        self.basic_blocks.push(block);
+        BasicBlockIdx(idx)
+    }
+
+    /// Used to create a temporary basic block that will be updated later, when
+    /// you need to have a destination for something before the destination is
+    /// made.
+    fn temp_block(&mut self) -> BasicBlockIdx {
+        self.insert_block(BasicBlock {
+            operations: vec![],
+            terminator: Terminator::Error,
+        })
+    }
+
+    fn new_slot(&mut self, ty: TypeIdx) -> SlotIdx {
+        let idx = self.slots.len();
+        self.slots.push(ty);
+        SlotIdx(idx)
+    }
+}
+
+/// Lowers a block into BasicBlocks
+///
+/// Returns the initial BasicBlockIdx
+fn lower_block(
+    block: &hir::Block, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
+    compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    todo!()
 }
 
 /// Lowers an expression into BasicBlocks
@@ -316,9 +354,131 @@ impl Body {
 /// Returns the initial BasicBlockIdx
 fn lower_expression(
     expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
-    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
+    compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
-    todo!()
+    match &expr.kind {
+        hir::ExpressionKind::Ident(name) => {
+            let op = BasicOperation::Assign(
+                Place::from(dst),
+                Value::Copy(Place::from(
+                    *value_scope.lookup(name).expect("value should exist"),
+                )),
+            );
+            let block = BasicBlock {
+                operations: vec![op],
+                terminator: Terminator::Goto { target: next_block },
+            };
+            body.insert_block(block)
+        }
+        hir::ExpressionKind::Integer(value) => {
+            let op = BasicOperation::Assign(
+                Place::from(dst),
+                Value::Constant(Constant::Integer(value.value)),
+            );
+            let block = BasicBlock {
+                operations: vec![op],
+                terminator: Terminator::Goto { target: next_block },
+            };
+            body.insert_block(block)
+        }
+        &hir::ExpressionKind::Bool(value) => {
+            let op = BasicOperation::Assign(
+                Place::from(dst),
+                Value::Constant(Constant::Bool(value)),
+            );
+            let block = BasicBlock {
+                operations: vec![op],
+                terminator: Terminator::Goto { target: next_block },
+            };
+            body.insert_block(block)
+        }
+        hir::ExpressionKind::StringLiteral(_) => todo!(),
+        hir::ExpressionKind::Array(_) => todo!(),
+        hir::ExpressionKind::Tuple(_) => todo!(),
+        hir::ExpressionKind::UnaryOp { op, operand } => todo!(),
+        hir::ExpressionKind::BinaryOp { lhs, op, rhs } => todo!(),
+        hir::ExpressionKind::If { condition, then_block, else_block } => {
+            // bb0: {
+            //    _1 = evaluate condition;
+            //    goto bb1;
+            // }
+            // bb1: {
+            //    switch_bool _1 [true -> then_block, false -> else_block]
+            // }
+            // then_block: {
+            //     _0 = then_block;
+            //     goto next_block;
+            // }
+            // else_block: {
+            //     _0 = else_block or () if None;
+            //     goto next_block;
+            // }
+            let switch_block_idx = body.temp_block();
+            let condition_slot = body.new_slot(compilation_unit.bool_type());
+            let evaluate_condition_block = lower_expression(
+                &condition,
+                ctx,
+                condition_slot,
+                body,
+                value_scope,
+                switch_block_idx,
+                compilation_unit,
+            );
+            let then_block_idx = lower_block(
+                then_block,
+                ctx,
+                dst,
+                body,
+                value_scope,
+                next_block,
+                compilation_unit,
+            );
+            // If there is no else block, the SwitchBool should just go to
+            // next_block in that case
+            let else_block_idx = match else_block {
+                Some(else_block) => lower_block(
+                    else_block,
+                    ctx,
+                    dst,
+                    body,
+                    value_scope,
+                    next_block,
+                    compilation_unit,
+                ),
+                None => {
+                    let init_return_op = BasicOperation::Assign(
+                        Place::from(dst),
+                        Value::Constant(Constant::Tuple(Arc::new([]))),
+                    );
+                    body.insert_block(BasicBlock {
+                        operations: vec![init_return_op],
+                        terminator: Terminator::Goto { target: next_block },
+                    })
+                }
+            };
+            body.basic_blocks[switch_block_idx.0].terminator =
+                Terminator::SwitchBool {
+                    scrutinee: condition_slot,
+                    true_dst: then_block_idx,
+                    false_dst: else_block_idx,
+                };
+            evaluate_condition_block
+        }
+        hir::ExpressionKind::Loop(_) => todo!(),
+        hir::ExpressionKind::Block(_) => todo!(),
+        hir::ExpressionKind::Match { scrutinee, arms } => {
+            unimplemented!("match expressions not implemented")
+        }
+        hir::ExpressionKind::Wildcard => panic!(
+            "wildcard expressions should only happen in the lhs of assignment \
+             ops, which should not use lower_expression"
+        ),
+        hir::ExpressionKind::Index { base, index } => todo!(),
+        hir::ExpressionKind::Call { function, args } => todo!(),
+        hir::ExpressionKind::Break { value } => todo!(),
+        hir::ExpressionKind::Return { value } => todo!(),
+    }
 }
 
 /// Index into Body::slots
@@ -353,6 +513,7 @@ enum Terminator {
         greater_dst: BasicBlockIdx,
     },
     Return,
+    /// This basic block is unreachable.
     Unreachable,
     Call {
         func: Value,
@@ -360,6 +521,9 @@ enum Terminator {
         return_destination: Place,
         target: BasicBlockIdx,
     },
+    /// This variant is only used when building MIR, and should not occur after
+    /// the MIR is built.
+    Error,
 }
 
 #[derive(Debug)]
@@ -371,6 +535,12 @@ enum BasicOperation {
 struct Place {
     local: SlotIdx,
     projections: Vec<PlaceProjection>,
+}
+
+impl From<SlotIdx> for Place {
+    fn from(value: SlotIdx) -> Self {
+        Self { local: value, projections: vec![] }
+    }
 }
 
 #[derive(Debug)]
@@ -394,5 +564,6 @@ enum Value {
 enum Constant {
     Integer(u128),
     Bool(bool),
+    Tuple(Arc<[Constant]>),
     GlobalAddress(GlobalIdx),
 }
