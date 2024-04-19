@@ -6,6 +6,12 @@
 //! * parenthesized around patterns/expressions/types are removed (the "order of
 //!   operations" is maintained by the tree structure anyway)
 //! * alt-patterns are combined (i.e. `(a | b) | c` is lowered to `a | b | c`).
+//! * todo
+//!
+//! After type-checking, some additional invariants hold:
+//!
+//! * `Expression::{Break, Loop, Continue}::label` are `Some`
+//! * todo
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -184,11 +190,11 @@ pub struct HirCtx<'a> {
     /// type (i.e. the type of `a` in `return a`)
     return_type: Option<TypeIdx>,
     /// If we are currently inside a `Loop`, the last element of this vector is
-    /// the `Loop`'s type.
+    /// the `Loop`'s label.
     ///
-    /// Used to type-check `value` in non-labeled `break value` expressions, as
-    /// well as to check that un-labeled `continue` expressions are valid.
-    loop_types: MaybeOwned<'a, Vec<TypeIdx>>,
+    /// Used to ensure that `break` and `continue` expressions always have a
+    /// label, as this makes mir-building easier.
+    nested_loop_labels: MaybeOwned<'a, Vec<BlockLabel>>,
     /// The types of all currently-entered labeled loops or blocks.
     ///
     /// Used to type-check the `value` in that `break 'label value`
@@ -207,7 +213,7 @@ impl<'a> HirCtx<'a> {
             value_scope,
             ty_ctx: ty_ctx.into(),
             return_type: None,
-            loop_types: vec![].into(),
+            nested_loop_labels: vec![].into(),
             labeled_block_types: HashMap::new().into(),
         }
     }
@@ -223,7 +229,7 @@ impl<'a> HirCtx<'a> {
             value_scope: Scope::new(Some(&parent.value_scope)),
             ty_ctx: parent.ty_ctx.borrowed(),
             return_type: parent.return_type,
-            loop_types: parent.loop_types.borrowed(),
+            nested_loop_labels: parent.nested_loop_labels.borrowed(),
             labeled_block_types: parent.labeled_block_types.borrowed(),
         }
     }
@@ -1872,25 +1878,30 @@ impl TypeCheck for Expression {
                 changed
             }
             ExpressionKind::Loop { label, body } => {
-                ctx.loop_types.push(self.type_);
-                if let Some(label) = *label {
-                    assert!(
-                        ctx.labeled_block_types
-                            .insert(label, (self.type_, LabeledBlockKind::Loop))
-                            .is_none(),
-                        "cannot shadow label {label:?}"
-                    );
-                }
+                // Note that we generate a synthetic label if this loop does not
+                // have an explicit label, so that we can ensure
+                // that every `break`/`continue` has a label, which makes
+                // mir-building easier.
+                let label =
+                    *label.get_or_insert_with(BlockLabel::new_synthetic);
+                ctx.nested_loop_labels.push(label);
+                assert!(
+                    ctx.labeled_block_types
+                        .insert(label, (self.type_, LabeledBlockKind::Loop))
+                        .is_none(),
+                    "cannot shadow label {label:?}"
+                );
                 let changed = body.type_check(ctx);
-                if let Some(label) = *label {
-                    ctx.labeled_block_types.remove(&label);
-                }
-                ctx.loop_types.pop();
+                ctx.labeled_block_types.remove(&label);
+                ctx.nested_loop_labels.pop();
                 changed
             }
             ExpressionKind::Block { label, body } => {
-                // Note that we don't push to `ctx.break_types` because an
-                // unlabeled `break` will never break from a block-expression.
+                // Note that we don't push to `ctx.nested_loop_labels` because
+                // an unlabeled `break` will never break from a
+                // block-expression. Also note that we don't add
+                // a synthetic label, since unlabeled blocks
+                // don't matter for break or continue.
                 if let Some(label) = *label {
                     assert!(
                         ctx.labeled_block_types
@@ -1938,19 +1949,16 @@ impl TypeCheck for Expression {
             }
             ExpressionKind::Break { label, value } => {
                 let mut changed = value.type_check(ctx);
-                let expected = match label {
-                    Some(label) => {
-                        ctx.labeled_block_types
-                            .get(label)
-                            .expect("break label undeclared")
-                            .0
-                    }
-                    None => ctx
-                        .loop_types
+                let label = *label.get_or_insert_with(|| {
+                    *ctx.nested_loop_labels
                         .last()
-                        .copied()
-                        .expect("break expr in non-loop context"),
-                };
+                        .expect("unlabeled break expr in non-loop context")
+                });
+                let expected = ctx
+                    .labeled_block_types
+                    .get(&label)
+                    .expect("break label undeclared")
+                    .0;
                 match value {
                     Some(value) => {
                         changed |= ctx.constrain_eq(expected, value.type_)
@@ -1974,20 +1982,19 @@ impl TypeCheck for Expression {
             ExpressionKind::Continue { label } => {
                 // We don't need to do type-checking as such, but we do need to
                 // check that there is a loop to continue.
-                match label {
-                    Some(label) => match ctx.labeled_block_types.get(label) {
-                        None => {
-                            panic!("invalid `continue`: no label {label:?}");
-                        }
-                        Some((_, LabeledBlockKind::Block)) => {
-                            panic!("invalid `continue` from labeled block");
-                        }
-                        Some((_, LabeledBlockKind::Loop)) => {}
-                    },
-                    None if ctx.loop_types.is_empty() => {
-                        panic!("invalid `continue`: not in a loop");
+                let label = label.get_or_insert_with(|| {
+                    *ctx.nested_loop_labels
+                        .last()
+                        .expect("continue expr in non-loop context")
+                });
+                match ctx.labeled_block_types.get(label) {
+                    None => {
+                        panic!("invalid `continue`: no label {label:?}");
                     }
-                    None => {}
+                    Some((_, LabeledBlockKind::Block)) => {
+                        panic!("invalid `continue` from labeled block");
+                    }
+                    Some((_, LabeledBlockKind::Loop)) => {}
                 }
                 false
             }
