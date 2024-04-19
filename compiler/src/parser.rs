@@ -4,7 +4,7 @@ use either::Either;
 use itertools::{Itertools, Position};
 use nom::{
     branch::alt,
-    combinator::{all_consuming, cut, eof, map_opt, not, opt, verify},
+    combinator::{all_consuming, cut, eof, map_opt, opt, verify},
     error::{ErrorKind, ParseError},
     multi::{fold_many0, many0, separated_list1},
     sequence::{pair, preceded, terminated, tuple},
@@ -1162,9 +1162,6 @@ fn parse_range_op(input: &[TokenTree]) -> IResult<'_, bool> {
 /// | '[' list[PATTERN_WITH_ALT] ']'
 /// ```
 fn parse_pattern(input: &[TokenTree]) -> IResult<'_, Pattern> {
-    // TODO: remove once todo!() is implmented below;
-    // this way we don't panic if there's nothing to parse anyway
-    let (input, _) = not(eof)(input)?;
     let wildcard_pattern = parse_ident("_").map(|_| Pattern::Wildcard);
     let ident_pattern = pair(opt(parse_ident("mut")), parse_non_kw_ident).map(
         |(mutable, ident)| Pattern::Ident { mutable: mutable.is_some(), ident },

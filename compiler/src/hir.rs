@@ -543,13 +543,17 @@ impl<'a> HirCtx<'a> {
         }
     }
 
-    fn type_check_and_insert_locals(
+    fn type_check_pattern_and_insert_locals(
         &mut self, pattern: &Pattern, type_: TypeIdx,
     ) -> bool {
         match pattern {
             Pattern::Wildcard => false,
             Pattern::Integer(_) | Pattern::Range { .. } => {
-                self.constrain_integer(type_)
+                unimplemented!(
+                    "non-exhaustive patterns and match expressions not \
+                     implemented"
+                );
+                // self.constrain_integer(type_)
             }
             Pattern::Ident { ident, .. } => {
                 self.value_scope.insert_noreplace(*ident, type_);
@@ -560,7 +564,8 @@ impl<'a> HirCtx<'a> {
                 let (mut changed, elem_ty) =
                     self.constrain_array(type_, elems.len());
                 for elem in elems {
-                    changed |= self.type_check_and_insert_locals(elem, elem_ty);
+                    changed |= self
+                        .type_check_pattern_and_insert_locals(elem, elem_ty);
                 }
                 changed
             }
@@ -568,7 +573,8 @@ impl<'a> HirCtx<'a> {
                 let (mut changed, elem_tys) =
                     self.constrain_tuple(type_, elems.len());
                 for (elem, &elem_ty) in std::iter::zip(elems, elem_tys.iter()) {
-                    changed |= self.type_check_and_insert_locals(elem, elem_ty);
+                    changed |= self
+                        .type_check_pattern_and_insert_locals(elem, elem_ty);
                 }
                 changed
             }
@@ -1687,25 +1693,10 @@ impl TypeCheck for FnItem {
         ctx.return_type = Some(self.return_type);
         let mut changed = false;
         for param in &self.params {
-            match (&param.pattern, &param.type_) {
-                (Pattern::Wildcard, _) => {}
-                (Pattern::Ident { ident, .. }, ty) => {
-                    ctx.register_local(*ident, *ty);
-                }
-                (Pattern::Integer(_), _) => {
-                    panic!("non-exaustive pattern in fn arg")
-                }
-                (Pattern::Alt(_), _) => {
-                    unimplemented!("alt patterns not implemented")
-                }
-                // (Pattern::Array(_), TypeKind::Array { .. }) => todo!(),
-                // (Pattern::Tuple(_), TypeKind::Tuple(_)) => todo!(),
-                (Pattern::Range { .. }, _) => {
-                    panic!("non-exaustive pattern in fn arg")
-                }
-                (Pattern::Tuple(_), _) => todo!(),
-                (Pattern::Array(_), _) => todo!(),
-            };
+            changed |= ctx.type_check_pattern_and_insert_locals(
+                &param.pattern,
+                param.type_,
+            );
         }
         changed |= self.body.type_check(&mut ctx);
 
@@ -2070,7 +2061,7 @@ impl TypeCheck for Statement {
                 if let Some(expr) = initializer {
                     changed |= ctx.constrain_eq(*type_, expr.type_);
                 }
-                ctx.type_check_and_insert_locals(&*pattern, *type_);
+                ctx.type_check_pattern_and_insert_locals(&*pattern, *type_);
                 changed
             }
             Statement::Expression { expression, has_semicolon } => {
