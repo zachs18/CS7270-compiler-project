@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 
 use crate::{
     ast::{self, BinaryOp, ComparisonOp},
-    token::{Ident, Integer, StringLiteral},
+    token::{Ident, Integer, Label, StringLiteral},
     util::{Scope, UnionFind},
 };
 
@@ -825,7 +825,7 @@ impl Expression {
             then_block: Block,
             else_block: Option<Block>,
         ) -> ExpressionKind::If { condition, then_block, else_block };
-        loop_expr(block: Block) -> ExpressionKind::Loop(block);
+        loop_expr(label: Option<Label>, body: Block) -> ExpressionKind::Loop { label, body };
         block(block: Block) -> ExpressionKind::Block(block);
         wildcard() -> ExpressionKind::Wildcard;
         match_expr(scrutinee: Box<Expression>, arms: Vec<MatchArm>) -> ExpressionKind::Match {
@@ -908,7 +908,10 @@ pub enum ExpressionKind {
         then_block: Block,
         else_block: Option<Block>,
     },
-    Loop(Block),
+    Loop {
+        label: Option<Label>,
+        body: Block,
+    },
     Block(Block),
     Match {
         scrutinee: Box<Expression>,
@@ -1230,10 +1233,11 @@ impl Lower for ast::Expression {
             }
             ast::Expression::While { label, condition, body } => {
                 todo!("handle label");
-                // loop {
+                // 'label: loop {
                 //     if condition { break } else body
                 // }
                 Expression::loop_expr(
+                    label,
                     Block {
                         statements: vec![Statement::Expression {
                             expression: Expression::if_block(
@@ -1255,7 +1259,6 @@ impl Lower for ast::Expression {
                 )
             }
             ast::Expression::For { label, pattern, iterable, body } => {
-                todo!("handle labels");
                 // {
                 //     let start = start;
                 //     let end = end;
@@ -1385,6 +1388,7 @@ impl Lower for ast::Expression {
                 };
                 let loop_stmt = Statement::Expression {
                     expression: Expression::loop_expr(
+                        label,
                         Block { statements: loop_statements, tail: None },
                         ctx,
                     ),
@@ -1414,8 +1418,7 @@ impl Lower for ast::Expression {
                 )
             }
             ast::Expression::Loop { label, body } => {
-                todo!("handle labels");
-                Expression::loop_expr(body.lower(ctx), ctx)
+                Expression::loop_expr(label, body.lower(ctx), ctx)
             }
             ast::Expression::Block { label, body } => {
                 todo!("handle labels");
@@ -1808,7 +1811,8 @@ impl TypeCheck for Expression {
                 }
                 changed
             }
-            ExpressionKind::Loop(body) => {
+            ExpressionKind::Loop { label, body } => {
+                todo!("handle labels");
                 ctx.break_types.push(self.type_);
                 let changed = body.type_check(ctx);
                 ctx.break_types.pop();
@@ -1894,12 +1898,10 @@ impl TypeCheck for Expression {
                 then_block.assert_concrete(ctx);
                 else_block.assert_concrete(ctx);
             }
-            ExpressionKind::Loop(body) => body.assert_concrete(ctx),
+            ExpressionKind::Loop { body, .. } => body.assert_concrete(ctx),
             ExpressionKind::Block(body) => body.assert_concrete(ctx),
-            ExpressionKind::Match { scrutinee, arms } => {
-                scrutinee.assert_concrete(ctx);
-                todo!();
-                // arms.assert_concrete(ctx);
+            ExpressionKind::Match { .. } => {
+                unimplemented!("match expressions not implemented");
             }
             ExpressionKind::Wildcard => {}
             ExpressionKind::Index { base, index } => {
