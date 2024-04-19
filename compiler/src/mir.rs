@@ -3,11 +3,12 @@
 //!
 //! Roughly similar to https://doc.rust-lang.org/stable/nightly-rustc/rustc_middle/mir/index.html
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use either::Either;
 
 use crate::{
+    ast::BinaryOp,
     hir::{self, HirCtx, PointerSized, Symbol},
     token::Ident,
     util::Scope,
@@ -146,7 +147,182 @@ pub struct CompilationUnit {
     globals: HashMap<hir::Symbol, (GlobalIdx, TypeIdx)>,
 }
 
+impl fmt::Display for CompilationUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pretty_print(f)
+    }
+}
+
 impl CompilationUnit {
+    fn pretty_print(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "CompilationUnit {{")?;
+        for (name, &(idx, ty)) in &self.globals {
+            let Some(ref item) = self.items[idx.0] else {
+                unreachable!("items should not be None after MIR-building")
+            };
+            self.pretty_print_global(name, ty, item, f)?;
+        }
+        writeln!(f, "}}")
+    }
+
+    fn display_type(&self, ty: TypeIdx) -> impl fmt::Display + '_ {
+        struct FmtType<'a>(&'a CompilationUnit, TypeIdx);
+
+        impl fmt::Display for FmtType<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let FmtType(this, ty) = *self;
+                match this.types[ty.0] {
+                    TypeKind::Pointer { mutable: true, pointee } => {
+                        write!(f, "*mut {}", this.display_type(pointee))
+                    }
+                    TypeKind::Pointer { mutable: false, pointee } => {
+                        write!(f, "*const {}", this.display_type(pointee))
+                    }
+                    TypeKind::Array { element, length } => {
+                        write!(f, "[{}; {length}]", this.display_type(element))
+                    }
+                    TypeKind::Slice { element } => {
+                        write!(f, "[{}", this.display_type(element))
+                    }
+                    TypeKind::Integer { signed, bits } => {
+                        if signed {
+                            write!(f, "i")?;
+                        } else {
+                            write!(f, "u")?;
+                        }
+                        match bits {
+                            Either::Left(bits) => write!(f, "{bits}"),
+                            Either::Right(PointerSized) => write!(f, "size"),
+                        }
+                    }
+                    TypeKind::Bool => write!(f, "bool"),
+                    TypeKind::Never => write!(f, "!"),
+                    TypeKind::Tuple(ref elems) => {
+                        let mut elems = elems.iter().copied();
+                        match elems.next() {
+                            None => write!(f, "()"),
+                            Some(first) => {
+                                write!(f, "({}", this.display_type(first))?;
+                                for elem in elems {
+                                    write!(f, ", {}", this.display_type(elem))?;
+                                }
+                                write!(f, ")")
+                            }
+                        }
+                    }
+                    TypeKind::Function {
+                        ref params,
+                        return_type,
+                        is_variadic,
+                    } => {
+                        let mut params = params.iter().copied();
+                        if is_variadic {
+                            write!(f, "fn(")?;
+                            for param in params {
+                                write!(f, "{}, ", this.display_type(param))?;
+                            }
+                            write!(
+                                f,
+                                "...) -> {}",
+                                this.display_type(return_type)
+                            )
+                        } else {
+                            match params.next() {
+                                None => write!(
+                                    f,
+                                    "fn() -> {}",
+                                    this.display_type(return_type)
+                                ),
+                                Some(first) => {
+                                    write!(
+                                        f,
+                                        "fn({}",
+                                        this.display_type(first)
+                                    )?;
+                                    for param in params {
+                                        write!(
+                                            f,
+                                            ", {}",
+                                            this.display_type(param)
+                                        )?;
+                                    }
+                                    write!(
+                                        f,
+                                        ") -> {}",
+                                        this.display_type(return_type)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        FmtType(self, ty)
+    }
+
+    fn pretty_print_global(
+        &self, name: &Symbol, ty: TypeIdx, kind: &GlobalKind,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        let mutable_str = |m| if m { "mut " } else { "" };
+        match *kind {
+            GlobalKind::DeclaredExternStatic { mutable, .. } => {
+                writeln!(
+                    f,
+                    "    extern static {}{name}: {};",
+                    mutable_str(mutable),
+                    self.display_type(ty)
+                )
+            }
+            GlobalKind::DefinedExternStatic {
+                mutable,
+                ref initializer,
+                ..
+            } => {
+                write!(
+                    f,
+                    "    extern static {}{name}: {} = ",
+                    mutable_str(mutable),
+                    self.display_type(ty)
+                )?;
+                self.pretty_print_body(initializer, f)
+            }
+            GlobalKind::LocalStatic { mutable, ref initializer, .. } => {
+                write!(
+                    f,
+                    "    static {}{name}: {} = ",
+                    mutable_str(mutable),
+                    self.display_type(ty)
+                )?;
+                self.pretty_print_body(initializer, f)
+            }
+            GlobalKind::DeclaredExternFn { .. } => todo!(),
+            GlobalKind::DefinedExternFn { ref body, .. } => todo!(),
+            GlobalKind::LocalFn { ref body, .. } => todo!(),
+        }
+    }
+
+    fn pretty_print_body(
+        &self, body: &Body, f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        writeln!(f, "{{")?;
+        for (idx, slot) in body.slots.iter().copied().enumerate() {
+            writeln!(f, "        let _{idx}: {};", self.display_type(slot))?;
+        }
+        writeln!(f)?;
+        for (idx, bb) in body.basic_blocks.iter().enumerate() {
+            writeln!(f, "        bb{idx}: {{")?;
+            for op in &bb.operations {
+                writeln!(f, "            {op}")?;
+            }
+            writeln!(f, "            {}", bb.terminator)?;
+            writeln!(f, "        }}")?;
+        }
+        writeln!(f, "    }}")
+    }
+
     fn new() -> Self {
         // TypeIdx(0) is unit, 1 is bool, 2 is never, 3..13 are integers
         let mut this =
@@ -354,7 +530,7 @@ impl Body {
     ) -> BasicBlockIdx {
         let op = BasicOperation::Assign(
             Place::from(dst),
-            Value::Constant(Constant::Tuple(Arc::new([]))),
+            Value::Operand(Operand::Constant(Constant::Tuple(Arc::new([])))),
         );
         self.insert_block(BasicBlock {
             operations: vec![op],
@@ -433,7 +609,9 @@ fn lower_block(
             body.basic_blocks[temp_block.0].operations.push(
                 BasicOperation::Assign(
                     Place::from(dst),
-                    Value::Constant(Constant::Tuple(Arc::new([]))),
+                    Value::Operand(Operand::Constant(Constant::Tuple(
+                        Arc::new([]),
+                    ))),
                 ),
             );
             body.basic_blocks[temp_block.0].terminator =
@@ -488,9 +666,9 @@ fn lower_expression(
         hir::ExpressionKind::Ident(name) => {
             let op = BasicOperation::Assign(
                 Place::from(dst),
-                Value::Copy(Place::from(
+                Value::Operand(Operand::Copy(Place::from(
                     *value_scope.lookup(name).expect("value should exist"),
-                )),
+                ))),
             );
             let block = BasicBlock {
                 operations: vec![op],
@@ -501,7 +679,9 @@ fn lower_expression(
         hir::ExpressionKind::Integer(value) => {
             let op = BasicOperation::Assign(
                 Place::from(dst),
-                Value::Constant(Constant::Integer(value.value)),
+                Value::Operand(Operand::Constant(Constant::Integer(
+                    value.value,
+                ))),
             );
             let block = BasicBlock {
                 operations: vec![op],
@@ -512,7 +692,7 @@ fn lower_expression(
         &hir::ExpressionKind::Bool(value) => {
             let op = BasicOperation::Assign(
                 Place::from(dst),
-                Value::Constant(Constant::Bool(value)),
+                Value::Operand(Operand::Constant(Constant::Bool(value))),
             );
             let block = BasicBlock {
                 operations: vec![op],
@@ -523,8 +703,84 @@ fn lower_expression(
         hir::ExpressionKind::StringLiteral(_) => todo!(),
         hir::ExpressionKind::Array(_) => todo!(),
         hir::ExpressionKind::Tuple(_) => todo!(),
-        hir::ExpressionKind::UnaryOp { op, operand } => todo!(),
-        hir::ExpressionKind::BinaryOp { lhs, op, rhs } => todo!(),
+        hir::ExpressionKind::UnaryOp { op, operand } => match op {
+            hir::UnaryOp::Not => todo!(),
+            hir::UnaryOp::Neg => todo!(),
+            hir::UnaryOp::AddrOf { mutable } => todo!(),
+            hir::UnaryOp::Deref => todo!(),
+            hir::UnaryOp::AsCast { to_type } => todo!(),
+        },
+        hir::ExpressionKind::BinaryOp { lhs, op, rhs } => match op {
+            crate::ast::BinaryOp::Assignment => {
+                todo!(
+                    "assignment expressions: need to lower lhs as a \
+                     place-expression, etc"
+                );
+            }
+            crate::ast::BinaryOp::Arithmetic(arith_op) => {
+                if arith_op.is_short_circuit() {
+                    todo!("short-circuiting ops");
+                } else {
+                    // bb0 {
+                    //  lhs_slot = evaluate lhs;
+                    //  goto -> bb1;
+                    // }
+                    // bb1 {
+                    //  goto -> bb2;
+                    // }
+                    // bb2 {
+                    //  rhs_slot = evaluate rhs;
+                    //  goto -> bb3;
+                    // }
+                    // bb3 {
+                    //  _0 = Add(lhs_slot, rhs_slot); // or whatever op
+                    //  goto -> next_block;
+                    // }
+                    let lhs_slot = body
+                        .new_slot(compilation_unit.lower_type(lhs.type_, ctx));
+                    let rhs_slot = body
+                        .new_slot(compilation_unit.lower_type(rhs.type_, ctx));
+                    let mut bb1 = body.temp_block();
+                    let mut bb3 = body.temp_block();
+                    let bb0 = lower_expression(
+                        lhs,
+                        ctx,
+                        lhs_slot,
+                        body,
+                        value_scope,
+                        bb1,
+                        compilation_unit,
+                    );
+                    let bb2 = lower_expression(
+                        lhs,
+                        ctx,
+                        rhs_slot,
+                        body,
+                        value_scope,
+                        bb3,
+                        compilation_unit,
+                    );
+                    body.basic_blocks[bb1.0].terminator =
+                        Terminator::Goto { target: bb2 };
+                    body.basic_blocks[bb3.0].terminator =
+                        Terminator::Goto { target: next_block };
+                    body.basic_blocks[bb3.0].operations.push(
+                        BasicOperation::Assign(
+                            Place::from(dst),
+                            Value::BinaryOp(
+                                *op,
+                                Operand::Copy(Place::from(lhs_slot)),
+                                Operand::Copy(Place::from(rhs_slot)),
+                            ),
+                        ),
+                    );
+
+                    bb0
+                }
+            }
+            crate::ast::BinaryOp::Comparison(_) => todo!(),
+            crate::ast::BinaryOp::RangeOp { end_inclusive } => todo!(),
+        },
         hir::ExpressionKind::If { condition, then_block, else_block } => {
             // bb0: {
             //    _1 = evaluate condition;
@@ -657,15 +913,73 @@ enum Terminator {
     Error,
 }
 
+impl fmt::Display for Terminator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Goto { target } => {
+                write!(f, "goto -> bb{}", target.0)
+            }
+            Self::SwitchBool { scrutinee, true_dst, false_dst } => write!(
+                f,
+                "switchBool(_{}) -> [false -> bb{}, true -> bb{}]",
+                scrutinee.0, false_dst.0, true_dst.0
+            ),
+            Self::Return => write!(f, "return"),
+            Self::Unreachable => write!(f, "unreachable"),
+            Self::Error => write!(f, "{{error}}"),
+            Self::SwitchCmp { lhs, rhs, less_dst, equal_dst, greater_dst } => f
+                .debug_struct("SwitchCmp")
+                .field("lhs", lhs)
+                .field("rhs", rhs)
+                .field("less_dst", less_dst)
+                .field("equal_dst", equal_dst)
+                .field("greater_dst", greater_dst)
+                .finish(),
+            Self::Call { func, args, return_destination, target } => write!(
+                f,
+                "{} = {}(todo: args) -> bb{}",
+                return_destination, func, target.0
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum BasicOperation {
     Assign(Place, Value),
+}
+
+impl fmt::Display for BasicOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Assign(place, value) => write!(f, "{place} = {value};"),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct Place {
     local: SlotIdx,
     projections: Vec<PlaceProjection>,
+}
+
+impl fmt::Display for Place {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use std::fmt::Write;
+        let mut place = format!("_{}", self.local.0);
+        for projection in &self.projections {
+            match projection {
+                PlaceProjection::ConstantIndex(idx) => {
+                    write!(place, ".{idx}").unwrap()
+                }
+                PlaceProjection::Index(idx) => {
+                    write!(place, "[_{}]", idx.0).unwrap()
+                }
+                PlaceProjection::Deref => place = format!("*({place})"),
+            }
+        }
+        f.write_str(place.as_str())
+    }
 }
 
 impl From<SlotIdx> for Place {
@@ -686,9 +1000,43 @@ enum PlaceProjection {
 }
 
 #[derive(Debug)]
-enum Value {
+enum Operand {
     Copy(Place),
     Constant(Constant),
+}
+
+impl fmt::Display for Operand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Operand::Copy(place) => write!(f, "Copy({place})"),
+            Operand::Constant(constant) => write!(f, "{constant}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Value {
+    Operand(Operand),
+    /// Must be Arithmetic or Comparison.
+    BinaryOp(BinaryOp, Operand, Operand),
+    Not(Box<Value>),
+    Negate(Box<Value>),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Operand(operand) => write!(f, "{operand}"),
+            Value::BinaryOp(op, lhs, rhs) => match op {
+                BinaryOp::Assignment => unreachable!(),
+                BinaryOp::Arithmetic(op) => write!(f, "{op:?}({lhs}, {rhs})"),
+                BinaryOp::Comparison(op) => write!(f, "{op:?}({lhs}, {rhs})"),
+                BinaryOp::RangeOp { .. } => todo!(),
+            },
+            Value::Not(_) => todo!(),
+            Value::Negate(_) => todo!(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -697,4 +1045,15 @@ enum Constant {
     Bool(bool),
     Tuple(Arc<[Constant]>),
     GlobalAddress(GlobalIdx),
+}
+
+impl fmt::Display for Constant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Constant::Integer(i) => write!(f, "const {i}"),
+            Constant::Bool(b) => write!(f, "const {b}"),
+            Constant::Tuple(_) => todo!(),
+            Constant::GlobalAddress(_) => todo!(),
+        }
+    }
 }

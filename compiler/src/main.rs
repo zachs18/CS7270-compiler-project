@@ -75,7 +75,7 @@ fn main() -> ExitCode {
 
     let mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
 
-    dbg!(&mir);
+    println!("{mir}");
 
     ExitCode::SUCCESS
 }

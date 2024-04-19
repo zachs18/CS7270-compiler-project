@@ -691,16 +691,16 @@ impl<'a> HirCtx<'a> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Symbol {
     Ident(Ident),
     Synthetic(usize),
 }
 
-impl std::fmt::Debug for Symbol {
+impl std::fmt::Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ident(ident) => ident.fmt(f),
+            Self::Ident(ident) => f.write_str(ident.ident),
             Self::Synthetic(idx) => write!(f, "synthetic#{idx}"),
         }
     }

@@ -81,6 +81,24 @@ pub enum ArithmeticOp {
     RightShift,
 }
 
+impl ArithmeticOp {
+    pub fn is_short_circuit(&self) -> bool {
+        match self {
+            ArithmeticOp::Add
+            | ArithmeticOp::Subtract
+            | ArithmeticOp::Multiply
+            | ArithmeticOp::Divide
+            | ArithmeticOp::Modulo
+            | ArithmeticOp::BitAnd
+            | ArithmeticOp::BitOr
+            | ArithmeticOp::BitXor
+            | ArithmeticOp::LeftShift
+            | ArithmeticOp::RightShift => false,
+            ArithmeticOp::And | ArithmeticOp::Or => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonOp {
     Equal,

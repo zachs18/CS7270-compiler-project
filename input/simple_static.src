@@ -1,0 +1,4 @@
+static X: u32 = 4;
+extern static Y: u32 = if true { 42 } else { 37 + 3 };
+extern static Z: u32;
+static A: u32 = 25 - 2;
