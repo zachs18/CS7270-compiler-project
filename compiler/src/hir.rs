@@ -1788,7 +1788,13 @@ impl TypeCheck for Expression {
                     UnaryOp::Neg => {
                         changed |= ctx.constrain_integer(operand.type_);
                     }
-                    UnaryOp::AddrOf { .. } => {}
+                    UnaryOp::AddrOf { mutable } => {
+                        log::warn!("TODO: allow coercing from *mut to *const?");
+                        let (c, operand_ty) =
+                            ctx.constrain_pointer(self.type_, *mutable);
+                        changed |= c;
+                        changed |= ctx.constrain_eq(operand_ty, operand.type_);
+                    }
                     UnaryOp::Deref => {
                         todo!(
                             "constrain pointer without constraining \
