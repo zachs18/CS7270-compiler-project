@@ -465,8 +465,8 @@ fn lower_expression(
                 };
             evaluate_condition_block
         }
-        hir::ExpressionKind::Loop(_) => todo!(),
-        hir::ExpressionKind::Block(_) => todo!(),
+        hir::ExpressionKind::Loop { .. } => todo!(),
+        hir::ExpressionKind::Block { .. } => todo!(),
         hir::ExpressionKind::Match { scrutinee, arms } => {
             unimplemented!("match expressions not implemented")
         }
@@ -476,8 +476,9 @@ fn lower_expression(
         ),
         hir::ExpressionKind::Index { base, index } => todo!(),
         hir::ExpressionKind::Call { function, args } => todo!(),
-        hir::ExpressionKind::Break { value } => todo!(),
+        hir::ExpressionKind::Break { label, value } => todo!(),
         hir::ExpressionKind::Return { value } => todo!(),
+        &hir::ExpressionKind::Continue { label } => todo!(),
     }
 }
 

@@ -661,6 +661,8 @@ fn parse_no_block_expression(input: &[TokenTree]) -> IResult<'_, Expression> {
             label,
             value: expr.map(Box::new),
         }),
+        preceded(parse_ident("continue"), opt(parse_label))
+            .map(|label| Expression::Continue { label }),
         preceded(parse_ident("return"), opt(parse_no_block_expression))
             .map(|expr| Expression::Return { value: expr.map(Box::new) }),
         parse_operator_expression,

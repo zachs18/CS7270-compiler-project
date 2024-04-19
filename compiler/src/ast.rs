@@ -209,6 +209,9 @@ pub enum Expression {
         function: Box<Expression>,
         args: Vec<Expression>,
     },
+    Continue {
+        label: Option<Label>,
+    },
     Break {
         label: Option<Label>,
         value: Option<Box<Expression>>,

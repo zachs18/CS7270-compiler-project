@@ -8,7 +8,6 @@
 //! * alt-patterns are combined (i.e. `(a | b) | c` is lowered to `a | b | c`).
 
 use std::{
-    borrow::Borrow,
     collections::{HashMap, VecDeque},
     hash::Hash,
     sync::{
@@ -25,6 +24,31 @@ use crate::{
     token::{Ident, Integer, Label, StringLiteral},
     util::{Scope, UnionFind},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockLabel {
+    Label(Label),
+    Synthetic(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LabeledBlockKind {
+    /// A labeled `for`, `while`, or `loop` loop.
+    ///
+    /// Can be `break`'d or `continue`'d.
+    Loop,
+    /// A labeled `{}` block.
+    ///
+    /// Can be `break`'d but *not* `continue`'d.
+    Block,
+}
+
+impl BlockLabel {
+    fn new_synthetic() -> Self {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        Self::Synthetic(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeVarKind {
@@ -159,9 +183,21 @@ pub struct HirCtx<'a> {
     /// If we are currently checking a `FnItem`, this is the `FnItem`'s return
     /// type (i.e. the type of `a` in `return a`)
     return_type: Option<TypeIdx>,
-    /// If we are currently inside a `Loop`, this is the `Loop`'s type (i.e.
-    /// the type of `v` in `break v` expressions inside the loop)
-    break_types: Either<&'a mut Vec<TypeIdx>, Box<Vec<TypeIdx>>>,
+    /// If we are currently inside a `Loop`, the last element of this vector is
+    /// the `Loop`'s type.
+    ///
+    /// Used to type-check `value` in non-labeled `break value` expressions, as
+    /// well as to check that un-labeled `continue` expressions are valid.
+    loop_types: Either<&'a mut Vec<TypeIdx>, Box<Vec<TypeIdx>>>,
+    /// The types of all currently-entered labeled loops or blocks.
+    ///
+    /// Used to type-check the `value` in that `break 'label value`
+    /// expressions, as well as to check that `continue 'label` expressions are
+    /// valid.
+    labeled_block_types: Either<
+        &'a mut HashMap<BlockLabel, (TypeIdx, LabeledBlockKind)>,
+        Box<HashMap<BlockLabel, (TypeIdx, LabeledBlockKind)>>,
+    >,
 }
 
 impl<'a> HirCtx<'a> {
@@ -173,7 +209,8 @@ impl<'a> HirCtx<'a> {
             value_scope,
             ty_ctx: Either::Right(Box::new(ty_ctx)),
             return_type: None,
-            break_types: Either::Right(Box::new(vec![])),
+            loop_types: Either::Right(Box::new(vec![])),
+            labeled_block_types: Either::Right(Box::new(HashMap::new())),
         }
     }
 
@@ -188,7 +225,8 @@ impl<'a> HirCtx<'a> {
             value_scope: Scope::new(Some(&parent.value_scope)),
             ty_ctx: Either::Left(&mut parent.ty_ctx),
             return_type: parent.return_type,
-            break_types: Either::Left(&mut parent.break_types),
+            loop_types: Either::Left(&mut parent.loop_types),
+            labeled_block_types: Either::Left(&mut parent.labeled_block_types),
         }
     }
 
@@ -825,8 +863,8 @@ impl Expression {
             then_block: Block,
             else_block: Option<Block>,
         ) -> ExpressionKind::If { condition, then_block, else_block };
-        loop_expr(label: Option<Label>, body: Block) -> ExpressionKind::Loop { label, body };
-        block(block: Block) -> ExpressionKind::Block(block);
+        loop_expr(label: Option<BlockLabel>, body: Block) -> ExpressionKind::Loop { label, body };
+        block(label: Option<BlockLabel>, block: Block) -> ExpressionKind::Block { label, body: block };
         wildcard() -> ExpressionKind::Wildcard;
         match_expr(scrutinee: Box<Expression>, arms: Vec<MatchArm>) -> ExpressionKind::Match {
             scrutinee, arms,
@@ -860,10 +898,11 @@ impl Expression {
         Expression { kind: ExpressionKind::StringLiteral(string), type_ }
     }
     fn break_expr(
-        value: Option<Box<Expression>>, ctx: &mut HirCtx,
+        label: Option<BlockLabel>, value: Option<Box<Expression>>,
+        ctx: &mut HirCtx,
     ) -> Expression {
         Expression {
-            kind: ExpressionKind::Break { value },
+            kind: ExpressionKind::Break { label, value },
             type_: ctx.ty_ctx.new_var(),
         }
     }
@@ -872,6 +911,14 @@ impl Expression {
     ) -> Expression {
         Expression {
             kind: ExpressionKind::Return { value },
+            type_: ctx.ty_ctx.new_var(),
+        }
+    }
+    fn continue_expr(
+        label: Option<BlockLabel>, ctx: &mut HirCtx,
+    ) -> Expression {
+        Expression {
+            kind: ExpressionKind::Continue { label },
             type_: ctx.ty_ctx.new_var(),
         }
     }
@@ -909,10 +956,13 @@ pub enum ExpressionKind {
         else_block: Option<Block>,
     },
     Loop {
-        label: Option<Label>,
+        label: Option<BlockLabel>,
         body: Block,
     },
-    Block(Block),
+    Block {
+        label: Option<BlockLabel>,
+        body: Block,
+    },
     Match {
         scrutinee: Box<Expression>,
         arms: Vec<MatchArm>,
@@ -926,7 +976,11 @@ pub enum ExpressionKind {
         function: Box<Expression>,
         args: Vec<Expression>,
     },
+    Continue {
+        label: Option<BlockLabel>,
+    },
     Break {
+        label: Option<BlockLabel>,
         value: Option<Box<Expression>>,
     },
     Return {
@@ -1232,12 +1286,13 @@ impl Lower for ast::Expression {
                 expr
             }
             ast::Expression::While { label, condition, body } => {
-                todo!("handle label");
+                let label = label
+                    .map_or_else(BlockLabel::new_synthetic, BlockLabel::Label);
                 // 'label: loop {
-                //     if condition { break } else body
+                //     if condition { break 'label } else body
                 // }
                 Expression::loop_expr(
-                    label,
+                    Some(label),
                     Block {
                         statements: vec![Statement::Expression {
                             expression: Expression::if_block(
@@ -1245,7 +1300,11 @@ impl Lower for ast::Expression {
                                 Block {
                                     statements: vec![],
                                     tail: Some(Box::new(
-                                        Expression::break_expr(None, ctx),
+                                        Expression::break_expr(
+                                            Some(label),
+                                            None,
+                                            ctx,
+                                        ),
                                     )),
                                 },
                                 Some(body.lower(ctx)),
@@ -1264,17 +1323,19 @@ impl Lower for ast::Expression {
                 //     let end = end;
                 //     if start <= end {
                 //         let mut i = start;
-                //         loop {
+                //         'label: loop {
                 //             // if end_inclusive is false the break is before
-                // the body             if i >= end { break }
+                // the body             if i >= end { break 'label }
                 //             let pattern = i;
                 //             body
                 //             // if end_inclusive is true, the break is after
-                // the body             if i >= end { break }
+                // the body             if i >= end { break 'label }
                 //             i = i + 1;
                 //         };
                 //     };
                 // }
+                let label = label
+                    .map_or_else(BlockLabel::new_synthetic, BlockLabel::Label);
                 let (start, inclusive, end) = match *iterable {
                     ast::Expression::BinaryOp {
                         lhs,
@@ -1340,7 +1401,9 @@ impl Lower for ast::Expression {
                         Block {
                             statements: vec![],
                             tail: Some(Box::new(Expression::break_expr(
-                                None, ctx,
+                                Some(label),
+                                None,
+                                ctx,
                             ))),
                         },
                         None,
@@ -1388,13 +1451,14 @@ impl Lower for ast::Expression {
                 };
                 let loop_stmt = Statement::Expression {
                     expression: Expression::loop_expr(
-                        label,
+                        Some(label),
                         Block { statements: loop_statements, tail: None },
                         ctx,
                     ),
                     has_semicolon: true,
                 };
                 Expression::block(
+                    None,
                     Block {
                         statements: vec![
                             let_start_stmt,
@@ -1417,13 +1481,16 @@ impl Lower for ast::Expression {
                     ctx,
                 )
             }
-            ast::Expression::Loop { label, body } => {
-                Expression::loop_expr(label, body.lower(ctx), ctx)
-            }
-            ast::Expression::Block { label, body } => {
-                todo!("handle labels");
-                Expression::block(body.lower(ctx), ctx)
-            }
+            ast::Expression::Loop { label, body } => Expression::loop_expr(
+                label.map(BlockLabel::Label),
+                body.lower(ctx),
+                ctx,
+            ),
+            ast::Expression::Block { label, body } => Expression::block(
+                label.map(BlockLabel::Label),
+                body.lower(ctx),
+                ctx,
+            ),
             ast::Expression::Match { scrutinee, arms } => {
                 Expression::match_expr(
                     scrutinee.lower(ctx),
@@ -1438,12 +1505,16 @@ impl Lower for ast::Expression {
             ast::Expression::Call { function, args } => {
                 Expression::call(function.lower(ctx), args.lower(ctx), ctx)
             }
-            ast::Expression::Break { label, value } => {
-                todo!("handle labels");
-                Expression::break_expr(value.lower(ctx), ctx)
-            }
+            ast::Expression::Break { label, value } => Expression::break_expr(
+                label.map(BlockLabel::Label),
+                value.lower(ctx),
+                ctx,
+            ),
             ast::Expression::Return { value } => {
                 Expression::return_expr(value.lower(ctx), ctx)
+            }
+            ast::Expression::Continue { label } => {
+                Expression::continue_expr(label.map(BlockLabel::Label), ctx)
             }
         }
     }
@@ -1636,7 +1707,6 @@ impl TypeCheck for FnItem {
                 }
                 (Pattern::Tuple(_), _) => todo!(),
                 (Pattern::Array(_), _) => todo!(),
-                _ => todo!(),
             };
         }
         changed |= self.body.type_check(&mut ctx);
@@ -1723,7 +1793,7 @@ impl TypeCheck for Expression {
                     UnaryOp::Neg => {
                         changed |= ctx.constrain_integer(operand.type_);
                     }
-                    UnaryOp::AddrOf { mutable } => todo!(),
+                    UnaryOp::AddrOf { .. } => todo!(),
                     UnaryOp::Deref => {
                         todo!(
                             "constrain pointer without constraining \
@@ -1793,7 +1863,7 @@ impl TypeCheck for Expression {
                         changed |= ctx
                             .constrain_eq(self.type_, ctx.ty_ctx.bool_type());
                     }
-                    BinaryOp::RangeOp { end_inclusive } => todo!(),
+                    BinaryOp::RangeOp { .. } => todo!(),
                 }
                 changed
             }
@@ -1812,14 +1882,45 @@ impl TypeCheck for Expression {
                 changed
             }
             ExpressionKind::Loop { label, body } => {
-                todo!("handle labels");
-                ctx.break_types.push(self.type_);
+                ctx.loop_types.push(self.type_);
+                if let Some(label) = *label {
+                    assert!(
+                        ctx.labeled_block_types
+                            .insert(label, (self.type_, LabeledBlockKind::Loop))
+                            .is_none(),
+                        "cannot shadow label {label:?}"
+                    );
+                }
                 let changed = body.type_check(ctx);
-                ctx.break_types.pop();
+                if let Some(label) = *label {
+                    ctx.labeled_block_types.remove(&label);
+                }
+                ctx.loop_types.pop();
                 changed
             }
-            ExpressionKind::Block(block) => block.type_check(ctx),
-            ExpressionKind::Match { scrutinee, arms } => todo!(),
+            ExpressionKind::Block { label, body } => {
+                // Note that we don't push to `ctx.break_types` because an
+                // unlabeled `break` will never break from a block-expression.
+                if let Some(label) = *label {
+                    assert!(
+                        ctx.labeled_block_types
+                            .insert(
+                                label,
+                                (self.type_, LabeledBlockKind::Block)
+                            )
+                            .is_none(),
+                        "cannot shadow label {label:?}"
+                    );
+                }
+                let changed = body.type_check(ctx);
+                if let Some(label) = *label {
+                    ctx.labeled_block_types.remove(&label);
+                }
+                changed
+            }
+            ExpressionKind::Match { .. } => {
+                unimplemented!("match expressions not implemented")
+            }
             ExpressionKind::Wildcard => todo!(),
             ExpressionKind::Index { base, index } => {
                 let mut changed = base.type_check(ctx);
@@ -1845,12 +1946,21 @@ impl TypeCheck for Expression {
 
                 changed
             }
-            ExpressionKind::Break { value } => {
+            ExpressionKind::Break { label, value } => {
                 let mut changed = value.type_check(ctx);
-                let &expected = ctx
-                    .break_types
-                    .last()
-                    .expect("break expr in non-loop context");
+                let expected = match label {
+                    Some(label) => {
+                        ctx.labeled_block_types
+                            .get(label)
+                            .expect("break label undeclared")
+                            .0
+                    }
+                    None => ctx
+                        .loop_types
+                        .last()
+                        .copied()
+                        .expect("break expr in non-loop context"),
+                };
                 match value {
                     Some(value) => {
                         changed |= ctx.constrain_eq(expected, value.type_)
@@ -1870,6 +1980,26 @@ impl TypeCheck for Expression {
                     None => changed |= ctx.constrain_unit(expected),
                 }
                 changed
+            }
+            ExpressionKind::Continue { label } => {
+                // We don't need to do type-checking as such, but we do need to
+                // check that there is a loop to continue.
+                match label {
+                    Some(label) => match ctx.labeled_block_types.get(label) {
+                        None => {
+                            panic!("invalid `continue`: no label {label:?}");
+                        }
+                        Some((_, LabeledBlockKind::Block)) => {
+                            panic!("invalid `continue` from labeled block");
+                        }
+                        Some((_, LabeledBlockKind::Loop)) => {}
+                    },
+                    None if ctx.loop_types.is_empty() => {
+                        panic!("invalid `continue`: not in a loop");
+                    }
+                    None => {}
+                }
+                false
             }
         }
     }
@@ -1899,7 +2029,7 @@ impl TypeCheck for Expression {
                 else_block.assert_concrete(ctx);
             }
             ExpressionKind::Loop { body, .. } => body.assert_concrete(ctx),
-            ExpressionKind::Block(body) => body.assert_concrete(ctx),
+            ExpressionKind::Block { body, .. } => body.assert_concrete(ctx),
             ExpressionKind::Match { .. } => {
                 unimplemented!("match expressions not implemented");
             }
@@ -1912,8 +2042,9 @@ impl TypeCheck for Expression {
                 function.assert_concrete(ctx);
                 args.assert_concrete(ctx);
             }
-            ExpressionKind::Break { value } => value.assert_concrete(ctx),
+            ExpressionKind::Break { value, .. } => value.assert_concrete(ctx),
             ExpressionKind::Return { value } => value.assert_concrete(ctx),
+            ExpressionKind::Continue { .. } => {}
         }
     }
 }
