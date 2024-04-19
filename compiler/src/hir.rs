@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 use crate::{
     ast::{self, BinaryOp, ComparisonOp},
     token::{Ident, Integer, Label, StringLiteral},
-    util::{Scope, UnionFind},
+    util::{MaybeOwned, Scope, UnionFind},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -179,7 +179,7 @@ pub struct HirCtx<'a> {
     /// HIR does not have a way to say anything about the *values* of such
     /// values.
     value_scope: Scope<'a, Symbol, TypeIdx>,
-    ty_ctx: Either<&'a mut TyCtx, Box<TyCtx>>,
+    ty_ctx: MaybeOwned<'a, TyCtx>,
     /// If we are currently checking a `FnItem`, this is the `FnItem`'s return
     /// type (i.e. the type of `a` in `return a`)
     return_type: Option<TypeIdx>,
@@ -188,16 +188,14 @@ pub struct HirCtx<'a> {
     ///
     /// Used to type-check `value` in non-labeled `break value` expressions, as
     /// well as to check that un-labeled `continue` expressions are valid.
-    loop_types: Either<&'a mut Vec<TypeIdx>, Box<Vec<TypeIdx>>>,
+    loop_types: MaybeOwned<'a, Vec<TypeIdx>>,
     /// The types of all currently-entered labeled loops or blocks.
     ///
     /// Used to type-check the `value` in that `break 'label value`
     /// expressions, as well as to check that `continue 'label` expressions are
     /// valid.
-    labeled_block_types: Either<
-        &'a mut HashMap<BlockLabel, (TypeIdx, LabeledBlockKind)>,
-        Box<HashMap<BlockLabel, (TypeIdx, LabeledBlockKind)>>,
-    >,
+    labeled_block_types:
+        MaybeOwned<'a, HashMap<BlockLabel, (TypeIdx, LabeledBlockKind)>>,
 }
 
 impl<'a> HirCtx<'a> {
@@ -207,10 +205,10 @@ impl<'a> HirCtx<'a> {
         Self {
             type_scope,
             value_scope,
-            ty_ctx: Either::Right(Box::new(ty_ctx)),
+            ty_ctx: ty_ctx.into(),
             return_type: None,
-            loop_types: Either::Right(Box::new(vec![])),
-            labeled_block_types: Either::Right(Box::new(HashMap::new())),
+            loop_types: vec![].into(),
+            labeled_block_types: HashMap::new().into(),
         }
     }
 
@@ -223,10 +221,10 @@ impl<'a> HirCtx<'a> {
         Self {
             type_scope: Scope::new(Some(&parent.type_scope)),
             value_scope: Scope::new(Some(&parent.value_scope)),
-            ty_ctx: Either::Left(&mut parent.ty_ctx),
+            ty_ctx: parent.ty_ctx.borrowed(),
             return_type: parent.return_type,
-            loop_types: Either::Left(&mut parent.loop_types),
-            labeled_block_types: Either::Left(&mut parent.labeled_block_types),
+            loop_types: parent.loop_types.borrowed(),
+            labeled_block_types: parent.labeled_block_types.borrowed(),
         }
     }
 

@@ -3,6 +3,7 @@ use std::{
     cell::Cell,
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
+    ops::{Deref, DerefMut},
 };
 
 #[derive(Default)]
@@ -115,6 +116,49 @@ where
                 entry.insert(value);
                 None
             }
+        }
+    }
+}
+
+pub enum MaybeOwned<'borrow, T> {
+    Owned(T),
+    Borrowed(&'borrow mut T),
+}
+
+impl<'a, T> MaybeOwned<'a, T> {
+    pub fn borrowed(&mut self) -> MaybeOwned<'_, T> {
+        MaybeOwned::Borrowed(&mut **self)
+    }
+}
+
+impl<T> From<T> for MaybeOwned<'_, T> {
+    fn from(value: T) -> Self {
+        MaybeOwned::Owned(value)
+    }
+}
+
+impl<'a, T> From<&'a mut T> for MaybeOwned<'a, T> {
+    fn from(value: &'a mut T) -> Self {
+        MaybeOwned::Borrowed(value)
+    }
+}
+
+impl<T> Deref for MaybeOwned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeOwned::Owned(value) => value,
+            MaybeOwned::Borrowed(value) => value,
+        }
+    }
+}
+
+impl<T> DerefMut for MaybeOwned<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            MaybeOwned::Owned(value) => value,
+            MaybeOwned::Borrowed(value) => value,
         }
     }
 }
