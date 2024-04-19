@@ -31,16 +31,21 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
     for (idx, item) in items.iter().enumerate() {
         match item {
             hir::Item::FnItem(hir::FnItem {
+                name,
                 extern_token: None,
                 body: None,
                 ..
-            }) => unreachable!("fn item must be extern, have a body, or both"),
+            }) => unreachable!(
+                "fn item {name:?} must be extern, have a body, or both"
+            ),
             hir::Item::StaticItem(hir::StaticItem {
+                name,
                 extern_token: None,
                 initializer: None,
                 ..
             }) => unreachable!(
-                "static item must be extern, have an initializer, or both"
+                "static item {name:?} must be extern, have an initializer, or \
+                 both"
             ),
             hir::Item::FnItem(hir::FnItem {
                 extern_token: Some(..),
@@ -58,19 +63,26 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 extern_token: Some(..),
                 initializer: None,
                 name,
+                mut_token,
                 ..
             }) => {
                 let Symbol::Ident(name) = *name else {
                     panic!("extern static must have a non-synthetic name");
                 };
-                let item = GlobalKind::DeclaredExternStatic { name };
+                let item = GlobalKind::DeclaredExternStatic {
+                    mutable: mut_token.is_some(),
+                    name,
+                };
                 compilation_unit.items[idx] = Some(item);
             }
             hir::Item::FnItem(hir::FnItem {
+                name,
                 body: Some(..),
                 is_variadic: true,
                 ..
-            }) => unimplemented!("defining variadic fns is not supported"),
+            }) => {
+                unimplemented!("defining variadic fn {name:?} is not supported")
+            }
             hir::Item::FnItem(hir::FnItem {
                 extern_token,
                 name,
@@ -93,11 +105,10 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
             }
             hir::Item::StaticItem(hir::StaticItem {
                 extern_token,
-                static_token,
-                mut_token,
                 name,
-                type_,
+                mut_token,
                 initializer: Some(initializer),
+                ..
             }) => {
                 let body = Body::new_for_static(
                     initializer,
@@ -105,12 +116,19 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     &mut compilation_unit,
                 );
                 let item = if extern_token.is_none() {
-                    GlobalKind::LocalStatic { initializer: body }
+                    GlobalKind::LocalStatic {
+                        mutable: mut_token.is_some(),
+                        initializer: body,
+                    }
                 } else {
                     let Symbol::Ident(name) = *name else {
                         panic!("extern static must have a non-synthetic name");
                     };
-                    GlobalKind::DefinedExternStatic { name, initializer: body }
+                    GlobalKind::DefinedExternStatic {
+                        mutable: mut_token.is_some(),
+                        name,
+                        initializer: body,
+                    }
                 };
                 compilation_unit.items[idx] = Some(item);
             }
@@ -265,9 +283,9 @@ pub struct GlobalIdx(usize);
 
 #[derive(Debug)]
 enum GlobalKind {
-    DeclaredExternStatic { name: Ident },
-    DefinedExternStatic { name: Ident, initializer: Body },
-    LocalStatic { initializer: Body },
+    DeclaredExternStatic { name: Ident, mutable: bool },
+    DefinedExternStatic { name: Ident, mutable: bool, initializer: Body },
+    LocalStatic { mutable: bool, initializer: Body },
     DeclaredExternFn { name: Ident },
     DefinedExternFn { name: Ident, body: Body, todo: () },
     LocalFn { body: Body, todo: () },
