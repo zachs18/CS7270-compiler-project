@@ -144,18 +144,13 @@ pub struct CompilationUnit {
     /// bodies.
     items: Vec<Option<GlobalKind>>,
     globals: HashMap<hir::Symbol, (GlobalIdx, TypeIdx)>,
-    todo: (),
 }
 
 impl CompilationUnit {
     fn new() -> Self {
         // TypeIdx(0) is unit, 1 is never, 2 is bool, 3..13 are integers
-        let mut this = Self {
-            types: vec![],
-            items: vec![],
-            todo: (),
-            globals: HashMap::new(),
-        };
+        let mut this =
+            Self { types: vec![], items: vec![], globals: HashMap::new() };
         this.insert_type(TypeKind::Tuple(Arc::new([])));
         this.insert_type(TypeKind::Never);
         this.insert_type(TypeKind::Bool);
@@ -354,6 +349,19 @@ impl Body {
         BasicBlockIdx(idx)
     }
 
+    fn insert_assign_unit_block(
+        &mut self, dst: SlotIdx, next_block: BasicBlockIdx,
+    ) -> BasicBlockIdx {
+        let op = BasicOperation::Assign(
+            Place::from(dst),
+            Value::Constant(Constant::Tuple(Arc::new([]))),
+        );
+        self.insert_block(BasicBlock {
+            operations: vec![op],
+            terminator: Terminator::Goto { target: next_block },
+        })
+    }
+
     /// Used to create a temporary basic block that will be updated later, when
     /// you need to have a destination for something before the destination is
     /// made.
@@ -371,20 +379,106 @@ impl Body {
     }
 }
 
-/// Lowers a block into BasicBlocks
+/// Lowers a block into BasicBlocks which evaluate the block, write the
+/// result to `dst`, and then jump to `next_block`.
 ///
-/// Returns the initial BasicBlockIdx
+/// Returns the initial BasicBlockIdx.
 fn lower_block(
     block: &hir::Block, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
     value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
     compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
-    todo!()
+    // 4 cases:
+    // * no statements, no tail: assign () to dst
+    // * no statements, with tail: assign tail to dst
+    // * statements, no tail: lower statements, assign () to dst
+    // * statements, with tail: lower statements, assign tail to dst
+
+    match block {
+        hir::Block { statements, tail: None } if statements.is_empty() => {
+            body.insert_assign_unit_block(dst, next_block)
+        }
+        hir::Block { statements, tail: Some(tail) }
+            if statements.is_empty() =>
+        {
+            lower_expression(
+                tail,
+                ctx,
+                dst,
+                body,
+                value_scope,
+                next_block,
+                compilation_unit,
+            )
+        }
+        hir::Block { statements, tail: None } => {
+            // Put temp blocks between each statement, which are NOPs except
+            // jumping to the next  statement. The last temp block is replaced
+            // with the _dst = () block, and then jumps to `next_block`.
+            let mut temp_block = body.temp_block();
+            let initial_block = temp_block;
+            for stmt in statements {
+                let dst = lower_statement(
+                    stmt,
+                    ctx,
+                    body,
+                    value_scope,
+                    next_block,
+                    compilation_unit,
+                );
+                body.basic_blocks[temp_block.0].terminator =
+                    Terminator::Goto { target: dst };
+                temp_block = body.temp_block();
+            }
+            body.basic_blocks[temp_block.0].operations.push(
+                BasicOperation::Assign(
+                    Place::from(dst),
+                    Value::Constant(Constant::Tuple(Arc::new([]))),
+                ),
+            );
+            body.basic_blocks[temp_block.0].terminator =
+                Terminator::Goto { target: next_block };
+            initial_block
+        }
+        hir::Block { statements, tail: Some(tail) } => {
+            // Put temp blocks between each statement, which are NOPs except
+            // jumping to the next  statement. The last temp block jumps to the
+            // expression evaluation, which then jumps to `next_block`.
+            let mut temp_block = body.temp_block();
+            let initial_block = temp_block;
+            for stmt in statements {
+                let dst = lower_statement(
+                    stmt,
+                    ctx,
+                    body,
+                    value_scope,
+                    next_block,
+                    compilation_unit,
+                );
+                body.basic_blocks[temp_block.0].terminator =
+                    Terminator::Goto { target: dst };
+                temp_block = body.temp_block();
+            }
+            let expr_block = lower_expression(
+                tail,
+                ctx,
+                dst,
+                body,
+                value_scope,
+                next_block,
+                compilation_unit,
+            );
+            body.basic_blocks[temp_block.0].terminator =
+                Terminator::Goto { target: expr_block };
+            initial_block
+        }
+    }
 }
 
-/// Lowers an expression into BasicBlocks
+/// Lowers an expression into BasicBlocks which evaluate the expression,
+/// write the result to `dst`, and then jump to `next_block`.
 ///
-/// Returns the initial BasicBlockIdx
+/// Returns the initial BasicBlockIdx.
 fn lower_expression(
     expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
     value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
@@ -479,16 +573,7 @@ fn lower_expression(
                     next_block,
                     compilation_unit,
                 ),
-                None => {
-                    let init_return_op = BasicOperation::Assign(
-                        Place::from(dst),
-                        Value::Constant(Constant::Tuple(Arc::new([]))),
-                    );
-                    body.insert_block(BasicBlock {
-                        operations: vec![init_return_op],
-                        terminator: Terminator::Goto { target: next_block },
-                    })
-                }
+                None => body.insert_assign_unit_block(dst, next_block),
             };
             body.basic_blocks[switch_block_idx.0].terminator =
                 Terminator::SwitchBool {
@@ -513,6 +598,18 @@ fn lower_expression(
         hir::ExpressionKind::Return { value } => todo!(),
         &hir::ExpressionKind::Continue { label } => todo!(),
     }
+}
+
+/// Lowers a statement into BasicBlocks which evaluate the statement and then
+/// jump to `next_block`.
+///
+/// Returns the initial BasicBlockIdx.
+fn lower_statement(
+    stmt: &hir::Statement, ctx: &HirCtx, body: &mut Body,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
+    compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    todo!()
 }
 
 /// Index into Body::slots
