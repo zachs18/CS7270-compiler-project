@@ -1778,11 +1778,11 @@ impl TypeCheck for Expression {
             ExpressionKind::UnaryOp { op, operand } => {
                 let mut changed = operand.type_check(ctx);
                 match op {
-                    UnaryOp::Not => todo!(),
+                    UnaryOp::Not => todo!("bool or integer"),
                     UnaryOp::Neg => {
                         changed |= ctx.constrain_integer(operand.type_);
                     }
-                    UnaryOp::AddrOf { .. } => todo!(),
+                    UnaryOp::AddrOf { .. } => {}
                     UnaryOp::Deref => {
                         todo!(
                             "constrain pointer without constraining \
@@ -1795,8 +1795,9 @@ impl TypeCheck for Expression {
                     }
                     UnaryOp::AsCast { to_type } => {
                         changed |= ctx.constrain_eq(*to_type, self.type_);
-                        todo!(
-                            "changed |= ctx.constrain_as_castable(src, dst);"
+                        log::warn!(
+                            "TODO:changed |= ctx.constrain_as_castable(src, \
+                             dst);"
                         );
                     }
                 }

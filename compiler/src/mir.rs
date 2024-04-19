@@ -67,15 +67,30 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 compilation_unit.items[idx] = Some(item);
             }
             hir::Item::FnItem(hir::FnItem {
+                body: Some(..),
+                is_variadic: true,
+                ..
+            }) => unimplemented!("defining variadic fns is not supported"),
+            hir::Item::FnItem(hir::FnItem {
                 extern_token,
-                fn_token,
                 name,
                 params,
-                return_type,
-                signature,
                 body: Some(body),
-                is_variadic,
-            }) => todo!(),
+                is_variadic: false,
+                ..
+            }) => {
+                let body =
+                    Body::new_for_fn(body, ctx, params, &mut compilation_unit);
+                let item = if extern_token.is_none() {
+                    GlobalKind::LocalFn { body, todo: () }
+                } else {
+                    let Symbol::Ident(name) = *name else {
+                        panic!("extern fn must have non-synthetic name");
+                    };
+                    GlobalKind::DefinedExternFn { name, body, todo: () }
+                };
+                compilation_unit.items[idx] = Some(item);
+            }
             hir::Item::StaticItem(hir::StaticItem {
                 extern_token,
                 static_token,
@@ -309,7 +324,7 @@ impl Body {
     }
 
     fn new_for_fn(
-        body: &hir::Expression, ctx: &HirCtx, args: &[hir::FnParam],
+        body: &hir::Block, ctx: &HirCtx, args: &[hir::FnParam],
         compilation_unit: &mut CompilationUnit,
     ) -> Self {
         todo!()
