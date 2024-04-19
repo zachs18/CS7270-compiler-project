@@ -148,12 +148,12 @@ pub struct CompilationUnit {
 
 impl CompilationUnit {
     fn new() -> Self {
-        // TypeIdx(0) is unit, 1 is never, 2 is bool, 3..13 are integers
+        // TypeIdx(0) is unit, 1 is bool, 2 is never, 3..13 are integers
         let mut this =
             Self { types: vec![], items: vec![], globals: HashMap::new() };
         this.insert_type(TypeKind::Tuple(Arc::new([])));
-        this.insert_type(TypeKind::Never);
         this.insert_type(TypeKind::Bool);
+        this.insert_type(TypeKind::Never);
         for b in [8, 16, 32, 64] {
             this.insert_type(TypeKind::Integer {
                 signed: true,
