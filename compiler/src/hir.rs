@@ -2079,12 +2079,9 @@ impl TypeCheck for Statement {
                 changed
             }
             Statement::Expression { expression, has_semicolon } => {
-                let mut changed = expression.type_check(ctx);
-                if !*has_semicolon {
-                    // Must be unit type
-                    changed |= ctx.constrain_unit(expression.type_);
-                }
-                changed
+                // Don't need to constrain the expression's type to unit,
+                // whatever value it evaluates to will just be discarded.
+                expression.type_check(ctx)
             }
         }
     }
