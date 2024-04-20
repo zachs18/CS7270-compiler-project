@@ -2078,7 +2078,7 @@ impl TypeCheck for Statement {
                 ctx.type_check_pattern_and_insert_locals(&*pattern, *type_);
                 changed
             }
-            Statement::Expression { expression, has_semicolon } => {
+            Statement::Expression { expression, .. } => {
                 // Don't need to constrain the expression's type to unit,
                 // whatever value it evaluates to will just be discarded.
                 expression.type_check(ctx)

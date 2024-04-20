@@ -15,3 +15,4 @@ match_like_matches_macro = "allow"
 unnecessary_fold = "allow" # false positive, would change semantics
 assigning_clones = "allow" # less clear IMO
 comparison_chain = "allow"
+too_many_arguments = "allow"

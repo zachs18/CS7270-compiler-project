@@ -785,7 +785,32 @@ fn lower_expression(
             hir::UnaryOp::Not => todo!(),
             hir::UnaryOp::Neg => todo!(),
             hir::UnaryOp::AddrOf { mutable } => todo!(),
-            hir::UnaryOp::Deref => todo!(),
+            hir::UnaryOp::Deref => {
+                let operand_slot = body
+                    .new_slot(compilation_unit.lower_type(operand.type_, ctx));
+                let deref_block = body.temp_block();
+                let initial_block = lower_expression(
+                    expr,
+                    ctx,
+                    operand_slot,
+                    body,
+                    value_scope,
+                    label_scope,
+                    deref_block,
+                    compilation_unit,
+                );
+                body.basic_blocks[deref_block.0] = BasicBlock {
+                    operations: vec![BasicOperation::Assign(
+                        Place::from(dst),
+                        Value::Operand(Operand::Copy(Place {
+                            local: operand_slot,
+                            projections: vec![PlaceProjection::Deref],
+                        })),
+                    )],
+                    terminator: Terminator::Goto { target: next_block },
+                };
+                initial_block
+            }
             hir::UnaryOp::AsCast { to_type } => todo!(),
         },
         hir::ExpressionKind::BinaryOp { lhs, op, rhs } => match op {
