@@ -21,7 +21,7 @@ use crate::{
 /// Lower type-checked hir to mir
 pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
     let mut compilation_unit = CompilationUnit::new();
-    compilation_unit.items.resize_with(items.len(), || None);
+    compilation_unit.items.reserve(items.len());
     for (idx, item) in items.iter().enumerate() {
         let ty = compilation_unit.lower_type(item.type_(), ctx);
         assert!(
@@ -32,6 +32,14 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
             "duplicate item {:?}",
             item.name()
         );
+        match item {
+            hir::Item::FnItem(_) => {
+                compilation_unit.items.push(Either::Right(ItemKindStub::Fn))
+            }
+            hir::Item::StaticItem(_) => {
+                compilation_unit.items.push(Either::Right(ItemKindStub::Static))
+            }
+        }
     }
     for (idx, item) in items.iter().enumerate() {
         match item {
@@ -62,7 +70,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     panic!("extern fn must have a non-synthetic name");
                 };
                 let item = ItemKind::DeclaredExternFn { name };
-                compilation_unit.items[idx] = Some(item);
+                compilation_unit.items[idx] = Either::Left(item);
             }
             hir::Item::StaticItem(hir::StaticItem {
                 extern_token: Some(..),
@@ -78,7 +86,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     mutable: mut_token.is_some(),
                     name,
                 };
-                compilation_unit.items[idx] = Some(item);
+                compilation_unit.items[idx] = Either::Left(item);
             }
             hir::Item::FnItem(hir::FnItem {
                 name,
@@ -113,7 +121,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     };
                     ItemKind::DefinedExternFn { name, body, todo: () }
                 };
-                compilation_unit.items[idx] = Some(item);
+                compilation_unit.items[idx] = Either::Left(item);
             }
             hir::Item::StaticItem(hir::StaticItem {
                 extern_token,
@@ -142,7 +150,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                         initializer: body,
                     }
                 };
-                compilation_unit.items[idx] = Some(item);
+                compilation_unit.items[idx] = Either::Left(item);
             }
         }
     }
@@ -152,9 +160,9 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
 #[derive(Debug)]
 pub struct CompilationUnit {
     types: Vec<TypeKind>,
-    /// These should only be `None` between registering globals and resolving
+    /// These should only be `Right` between registering globals and resolving
     /// bodies.
-    items: Vec<Option<ItemKind>>,
+    items: Vec<Either<ItemKind, ItemKindStub>>,
     globals: HashMap<hir::Symbol, (ItemIdx, TypeIdx)>,
 }
 
@@ -168,8 +176,8 @@ impl CompilationUnit {
     fn pretty_print(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "CompilationUnit {{")?;
         for (name, &(idx, ty)) in &self.globals {
-            let Some(ref item) = self.items[idx.0] else {
-                unreachable!("items should not be None after MIR-building")
+            let Either::Left(ref item) = self.items[idx.0] else {
+                unreachable!("items should not be stubs after MIR-building")
             };
             self.pretty_print_global(name, ty, item, f)?;
         }
@@ -522,7 +530,7 @@ impl CompilationUnit {
     ) -> (Symbol, ItemIdx) {
         let idx = self.items.len();
         let symbol = Symbol::new_synthetic();
-        self.items.push(Some(ItemKind::StringLiteral { data }));
+        self.items.push(Either::Left(ItemKind::StringLiteral { data }));
         let idx = ItemIdx(idx);
         let i8 = self.integer_type(true, Either::Left(8));
         let ty = self
@@ -561,6 +569,15 @@ enum ItemKind {
     DefinedExternFn { name: Ident, body: Body, todo: () },
     LocalFn { body: Body, todo: () },
     StringLiteral { data: &'static [u8] },
+}
+
+/// Only used while lowering, so that items being lowered can know how to access
+/// another item.
+#[derive(Debug)]
+enum ItemKindStub {
+    Static,
+    Fn,
+    StringLiteral,
 }
 
 #[derive(Debug)]
@@ -839,18 +856,13 @@ fn lower_expression(
                         // for fn/string literal:
                         //   _dst = Operand::Constant(Constant::GlobalAddress(global_idx));
 
-                        match compilation_unit.items[item_idx.0]
-                            .as_ref()
-                            .expect(
-                                "items should not be None after \
-                                 MIR-building... except we are currently \
-                                 doing MIR-building, so we'll probabaly have \
-                                 to keep track of item kinds before lowering \
-                                 them, not just their names",
-                            ) {
-                            ItemKind::DeclaredExternStatic { .. }
-                            | ItemKind::DefinedExternStatic { .. }
-                            | ItemKind::LocalStatic { .. } => {
+                        match compilation_unit.items[item_idx.0].as_ref() {
+                            Either::Left(
+                                ItemKind::DeclaredExternStatic { .. }
+                                | ItemKind::DefinedExternStatic { .. }
+                                | ItemKind::LocalStatic { .. },
+                            )
+                            | Either::Right(ItemKindStub::Static) => {
                                 let addr_ty = compilation_unit.insert_type(
                                     TypeKind::Pointer {
                                         mutable: false,
@@ -876,10 +888,15 @@ fn lower_expression(
                                     ),
                                 ]
                             }
-                            ItemKind::DeclaredExternFn { .. }
-                            | ItemKind::DefinedExternFn { .. }
-                            | ItemKind::LocalFn { .. }
-                            | ItemKind::StringLiteral { .. } => {
+                            Either::Left(
+                                ItemKind::DeclaredExternFn { .. }
+                                | ItemKind::DefinedExternFn { .. }
+                                | ItemKind::LocalFn { .. }
+                                | ItemKind::StringLiteral { .. },
+                            )
+                            | Either::Right(
+                                ItemKindStub::Fn | ItemKindStub::StringLiteral,
+                            ) => {
                                 vec![BasicOperation::Assign(
                                     Place::from(dst),
                                     Value::Operand(Operand::Constant(
