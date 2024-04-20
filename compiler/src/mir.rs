@@ -3,7 +3,11 @@
 //!
 //! Roughly similar to https://doc.rust-lang.org/stable/nightly-rustc/rustc_middle/mir/index.html
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use either::Either;
 
@@ -23,7 +27,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
         assert!(
             compilation_unit
                 .globals
-                .insert(item.name(), (GlobalIdx(idx), ty))
+                .insert(item.name(), (ItemIdx(idx), ty))
                 .is_none(),
             "duplicate item {:?}",
             item.name()
@@ -57,7 +61,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 let Symbol::Ident(name) = *name else {
                     panic!("extern fn must have a non-synthetic name");
                 };
-                let item = GlobalKind::DeclaredExternFn { name };
+                let item = ItemKind::DeclaredExternFn { name };
                 compilation_unit.items[idx] = Some(item);
             }
             hir::Item::StaticItem(hir::StaticItem {
@@ -70,7 +74,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 let Symbol::Ident(name) = *name else {
                     panic!("extern static must have a non-synthetic name");
                 };
-                let item = GlobalKind::DeclaredExternStatic {
+                let item = ItemKind::DeclaredExternStatic {
                     mutable: mut_token.is_some(),
                     name,
                 };
@@ -90,17 +94,24 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 params,
                 body: Some(body),
                 is_variadic: false,
-                ..
+                fn_token,
+                return_type,
+                signature,
             }) => {
-                let body =
-                    Body::new_for_fn(body, ctx, params, &mut compilation_unit);
+                let body = Body::new_for_fn(
+                    body,
+                    ctx,
+                    params,
+                    *return_type,
+                    &mut compilation_unit,
+                );
                 let item = if extern_token.is_none() {
-                    GlobalKind::LocalFn { body, todo: () }
+                    ItemKind::LocalFn { body, todo: () }
                 } else {
                     let Symbol::Ident(name) = *name else {
                         panic!("extern fn must have non-synthetic name");
                     };
-                    GlobalKind::DefinedExternFn { name, body, todo: () }
+                    ItemKind::DefinedExternFn { name, body, todo: () }
                 };
                 compilation_unit.items[idx] = Some(item);
             }
@@ -117,7 +128,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     &mut compilation_unit,
                 );
                 let item = if extern_token.is_none() {
-                    GlobalKind::LocalStatic {
+                    ItemKind::LocalStatic {
                         mutable: mut_token.is_some(),
                         initializer: body,
                     }
@@ -125,7 +136,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     let Symbol::Ident(name) = *name else {
                         panic!("extern static must have a non-synthetic name");
                     };
-                    GlobalKind::DefinedExternStatic {
+                    ItemKind::DefinedExternStatic {
                         mutable: mut_token.is_some(),
                         name,
                         initializer: body,
@@ -143,8 +154,8 @@ pub struct CompilationUnit {
     types: Vec<TypeKind>,
     /// These should only be `None` between registering globals and resolving
     /// bodies.
-    items: Vec<Option<GlobalKind>>,
-    globals: HashMap<hir::Symbol, (GlobalIdx, TypeIdx)>,
+    items: Vec<Option<ItemKind>>,
+    globals: HashMap<hir::Symbol, (ItemIdx, TypeIdx)>,
 }
 
 impl fmt::Display for CompilationUnit {
@@ -314,12 +325,12 @@ impl CompilationUnit {
     }
 
     fn pretty_print_global(
-        &self, name: &Symbol, ty: TypeIdx, kind: &GlobalKind,
+        &self, name: &Symbol, ty: TypeIdx, kind: &ItemKind,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         let mutable_str = |m| if m { "mut " } else { "" };
         match *kind {
-            GlobalKind::DeclaredExternStatic { mutable, .. } => {
+            ItemKind::DeclaredExternStatic { mutable, .. } => {
                 writeln!(
                     f,
                     "    extern static {}{name}: {};",
@@ -327,10 +338,8 @@ impl CompilationUnit {
                     self.display_type(ty)
                 )
             }
-            GlobalKind::DefinedExternStatic {
-                mutable,
-                ref initializer,
-                ..
+            ItemKind::DefinedExternStatic {
+                mutable, ref initializer, ..
             } => {
                 write!(
                     f,
@@ -340,7 +349,7 @@ impl CompilationUnit {
                 )?;
                 self.pretty_print_body(initializer, f)
             }
-            GlobalKind::LocalStatic { mutable, ref initializer, .. } => {
+            ItemKind::LocalStatic { mutable, ref initializer, .. } => {
                 write!(
                     f,
                     "    static {}{name}: {} = ",
@@ -349,10 +358,10 @@ impl CompilationUnit {
                 )?;
                 self.pretty_print_body(initializer, f)
             }
-            GlobalKind::DeclaredExternFn { .. } => {
+            ItemKind::DeclaredExternFn { .. } => {
                 writeln!(f, "    extern fn {name} = {};", self.display_type(ty))
             }
-            GlobalKind::DefinedExternFn { ref body, .. } => {
+            ItemKind::DefinedExternFn { ref body, .. } => {
                 write!(
                     f,
                     "    extern fn {name}{} = ",
@@ -360,9 +369,16 @@ impl CompilationUnit {
                 )?;
                 self.pretty_print_body(body, f)
             }
-            GlobalKind::LocalFn { ref body, .. } => {
+            ItemKind::LocalFn { ref body, .. } => {
                 write!(f, "    fn {name}{} = ", self.display_fn_args(ty))?;
                 self.pretty_print_body(body, f)
+            }
+            ItemKind::StringLiteral { data } => {
+                writeln!(
+                    f,
+                    "    string literal {name} = \"{}\";",
+                    data.escape_ascii()
+                )
             }
         }
     }
@@ -444,14 +460,21 @@ impl CompilationUnit {
         TypeIdx(idx)
     }
 
+    fn lower_mutability(
+        &mut self, mutability: hir::MutIdx, ctx: &HirCtx,
+    ) -> bool {
+        ctx.resolve_mut(mutability)
+            .expect("types should all be resolved after hir type checking")
+    }
+
     fn lower_type(&mut self, ty: hir::TypeIdx, ctx: &HirCtx) -> TypeIdx {
         match ctx
             .resolve_ty(ty)
             .expect("types should all be resolved after hir type checking")
         {
-            &hir::TypeKind::Pointer { mutable, pointee } => {
+            &hir::TypeKind::Pointer { mutability, pointee } => {
                 let tk = TypeKind::Pointer {
-                    mutable,
+                    mutable: self.lower_mutability(mutability, ctx),
                     pointee: self.lower_type(pointee, ctx),
                 };
                 self.insert_type(tk)
@@ -493,6 +516,20 @@ impl CompilationUnit {
             }
         }
     }
+
+    fn make_anonymous_static_for_string_literal(
+        &mut self, data: &'static [u8],
+    ) -> (Symbol, ItemIdx) {
+        let idx = self.items.len();
+        let symbol = Symbol::new_synthetic();
+        self.items.push(Some(ItemKind::StringLiteral { data }));
+        let idx = ItemIdx(idx);
+        let i8 = self.integer_type(true, Either::Left(8));
+        let ty = self
+            .insert_type(TypeKind::Array { element: i8, length: data.len() });
+        self.globals.insert(symbol, (idx, ty));
+        (symbol, idx)
+    }
 }
 
 /// Index into `CompilationUnit::types`.
@@ -513,16 +550,17 @@ pub enum TypeKind {
 
 /// Index into `CompilationUnit::globals`.
 #[derive(Debug, Clone, Copy)]
-pub struct GlobalIdx(usize);
+pub struct ItemIdx(usize);
 
 #[derive(Debug)]
-enum GlobalKind {
+enum ItemKind {
     DeclaredExternStatic { name: Ident, mutable: bool },
     DefinedExternStatic { name: Ident, mutable: bool, initializer: Body },
     LocalStatic { mutable: bool, initializer: Body },
     DeclaredExternFn { name: Ident },
     DefinedExternFn { name: Ident, body: Body, todo: () },
     LocalFn { body: Body, todo: () },
+    StringLiteral { data: &'static [u8] },
 }
 
 #[derive(Debug)]
@@ -562,9 +600,11 @@ impl Body {
         let mut value_scope: Scope<Symbol, SlotIdx> = Scope::new(None);
         let mut label_scope: Scope<BlockLabel, LabelDestination> =
             Scope::new(None);
+        let initial_block = BasicBlockIdx(0);
+        let terminal_block = BasicBlockIdx(1);
 
         // SlotIdx(0) is always the return value
-        let initial_block_idx = lower_expression(
+        let body_initial_block = lower_expression(
             initializer,
             ctx,
             SlotIdx(0),
@@ -574,16 +614,58 @@ impl Body {
             BasicBlockIdx(1),
             compilation_unit,
         );
-        this.basic_blocks[0].terminator =
-            Terminator::Goto { target: initial_block_idx };
+        this.basic_blocks[initial_block.0].terminator =
+            Terminator::Goto { target: body_initial_block };
         this
     }
 
     fn new_for_fn(
         body: &hir::Block, ctx: &HirCtx, args: &[hir::FnParam],
-        compilation_unit: &mut CompilationUnit,
+        return_type: hir::TypeIdx, compilation_unit: &mut CompilationUnit,
     ) -> Self {
-        todo!();
+        let return_type = compilation_unit.lower_type(return_type, ctx);
+
+        // The initial BasicBlock. This will be overwritten with a Goto
+        // terminator for the fn body's initial block.
+        let initial_block = BasicBlock {
+            operations: vec![],
+            terminator: Terminator::Unreachable,
+        };
+        // The terminal BasicBlock. This is given as the destination block when
+        // lowering the fn body.
+        let terminal_block =
+            BasicBlock { operations: vec![], terminator: Terminator::Return };
+        let mut this = Body {
+            slots: vec![return_type],
+            basic_blocks: vec![initial_block, terminal_block],
+        };
+        let initial_block = BasicBlockIdx(0);
+        let terminal_block = BasicBlockIdx(1);
+
+        let mut value_scope: Scope<Symbol, SlotIdx> = Scope::new(None);
+        let mut label_scope: Scope<BlockLabel, LabelDestination> =
+            Scope::new(None);
+
+        // First, we lower the param patterns
+        for paran in args {
+            todo!();
+        }
+
+        // The we lower the body
+        // SlotIdx(0) is always the return value
+        let body_initial_block = lower_block(
+            body,
+            ctx,
+            SlotIdx(0),
+            &mut this,
+            &mut value_scope,
+            &mut label_scope,
+            terminal_block,
+            compilation_unit,
+        );
+        this.basic_blocks[initial_block.0].terminator =
+            Terminator::Goto { target: body_initial_block };
+        this
     }
 
     fn insert_block(&mut self, block: BasicBlock) -> BasicBlockIdx {
@@ -740,16 +822,78 @@ fn lower_expression(
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
-    match &expr.kind {
+    let orig_expr = expr;
+    let _expr = (); // prevent accidentally stack-overflowing from passing the wrong expression
+    match &orig_expr.kind {
         hir::ExpressionKind::Ident(name) => {
-            let op = BasicOperation::Assign(
-                Place::from(dst),
-                Value::Operand(Operand::Copy(Place::from(
-                    *value_scope.lookup(name).expect("value should exist"),
-                ))),
-            );
+            let ops = match value_scope.lookup(name) {
+                Some(&local) => vec![BasicOperation::Assign(
+                    Place::from(dst),
+                    Value::Operand(Operand::Copy(Place::from(local))),
+                )],
+                None => match compilation_unit.globals.get(name) {
+                    Some((item_idx, type_idx)) => {
+                        // for static:
+                        //   _tmp = Operand::Constant(Constant::GlobalAddress(global_idx));
+                        //   _dst = Operand::Copy(*_tmp);
+                        // for fn/string literal:
+                        //   _dst = Operand::Constant(Constant::GlobalAddress(global_idx));
+
+                        match compilation_unit.items[item_idx.0]
+                            .as_ref()
+                            .expect(
+                                "items should not be None after \
+                                 MIR-building... except we are currently \
+                                 doing MIR-building, so we'll probabaly have \
+                                 to keep track of item kinds before lowering \
+                                 them, not just their names",
+                            ) {
+                            ItemKind::DeclaredExternStatic { .. }
+                            | ItemKind::DefinedExternStatic { .. }
+                            | ItemKind::LocalStatic { .. } => {
+                                let addr_ty = compilation_unit.insert_type(
+                                    TypeKind::Pointer {
+                                        mutable: false,
+                                        pointee: *type_idx,
+                                    },
+                                );
+                                let addr_slot = body.new_slot(addr_ty);
+                                vec![
+                                    BasicOperation::Assign(
+                                        Place::from(addr_slot),
+                                        Value::Operand(Operand::Constant(
+                                            Constant::ItemAddress(*name),
+                                        )),
+                                    ),
+                                    BasicOperation::Assign(
+                                        Place::from(dst),
+                                        Value::Operand(Operand::Copy(Place {
+                                            local: addr_slot,
+                                            projections: vec![
+                                                PlaceProjection::Deref,
+                                            ],
+                                        })),
+                                    ),
+                                ]
+                            }
+                            ItemKind::DeclaredExternFn { .. }
+                            | ItemKind::DefinedExternFn { .. }
+                            | ItemKind::LocalFn { .. }
+                            | ItemKind::StringLiteral { .. } => {
+                                vec![BasicOperation::Assign(
+                                    Place::from(dst),
+                                    Value::Operand(Operand::Constant(
+                                        Constant::ItemAddress(*name),
+                                    )),
+                                )]
+                            }
+                        }
+                    }
+                    None => unreachable!("no value {name} in scope"),
+                },
+            };
             let block = BasicBlock {
-                operations: vec![op],
+                operations: ops,
                 terminator: Terminator::Goto { target: next_block },
             };
             body.insert_block(block)
@@ -778,19 +922,36 @@ fn lower_expression(
             };
             body.insert_block(block)
         }
-        hir::ExpressionKind::StringLiteral(_) => todo!(),
+        hir::ExpressionKind::StringLiteral(literal) => {
+            // create an anonymous static, and load its address
+            let (anon_global, _) = compilation_unit
+                .make_anonymous_static_for_string_literal(literal.data);
+            let op = BasicOperation::Assign(
+                Place::from(dst),
+                Value::Operand(Operand::Constant(Constant::ItemAddress(
+                    anon_global,
+                ))),
+            );
+            let block = BasicBlock {
+                operations: vec![op],
+                terminator: Terminator::Goto { target: next_block },
+            };
+            body.insert_block(block)
+        }
         hir::ExpressionKind::Array(_) => todo!(),
         hir::ExpressionKind::Tuple(_) => todo!(),
         hir::ExpressionKind::UnaryOp { op, operand } => match op {
             hir::UnaryOp::Not => todo!(),
             hir::UnaryOp::Neg => todo!(),
-            hir::UnaryOp::AddrOf { mutable } => todo!(),
+            hir::UnaryOp::AddrOf { mutable } => {
+                todo!("need to lower operand as a place expression")
+            }
             hir::UnaryOp::Deref => {
                 let operand_slot = body
                     .new_slot(compilation_unit.lower_type(operand.type_, ctx));
                 let deref_block = body.temp_block();
                 let initial_block = lower_expression(
-                    expr,
+                    operand,
                     ctx,
                     operand_slot,
                     body,
@@ -1174,7 +1335,7 @@ enum Constant {
     Integer(u128),
     Bool(bool),
     Tuple(Arc<[Constant]>),
-    GlobalAddress(GlobalIdx),
+    ItemAddress(Symbol),
 }
 
 impl fmt::Display for Constant {
@@ -1182,8 +1343,22 @@ impl fmt::Display for Constant {
         match self {
             Constant::Integer(i) => write!(f, "const {i}"),
             Constant::Bool(b) => write!(f, "const {b}"),
-            Constant::Tuple(_) => todo!(),
-            Constant::GlobalAddress(_) => todo!(),
+            Constant::Tuple(elems) => {
+                let mut elems = elems.iter();
+                if let Some(first) = elems.next() {
+                    write!(f, "const ({first}")?;
+                    for elem in elems {
+                        write!(f, ", {elem}")?;
+                    }
+                    write!(f, ")")
+                } else {
+                    write!(f, "()")
+                }
+            }
+            Constant::ItemAddress(item) => {
+                // TODO: print the name?
+                write!(f, "const {{&item {}}}", item)
+            }
         }
     }
 }

@@ -62,6 +62,12 @@ enum TypeVarKind {
     Integer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mutability {
+    Constant,
+    Mutable,
+}
+
 struct TyCtx {
     /// Type unification constraints.
     ///
@@ -69,9 +75,18 @@ struct TyCtx {
     constraints: UnionFind,
     /// Type vars
     ///
-    /// Map from type var to actual type, if an index is `None`, that type var
+    /// Map from type var to actual type, if an index is `Right`, that type var
     /// has not been resolved yet.
     substitutions: Vec<Either<TypeKind, TypeVarKind>>,
+    /// Mutability unification constraints.
+    ///
+    /// Mutability vars which must be the same mutability.
+    mut_constraints: UnionFind,
+    /// Mutability vars
+    ///
+    /// Map from mutability var to actual mutability, if an index is `None`,
+    /// that type var has not been resolved yet.
+    mut_substitutions: Vec<Option<Mutability>>,
 }
 
 static EMPTY_TYPE_LIST: Lazy<Arc<[TypeIdx]>> = Lazy::new(|| Arc::new([]));
@@ -82,6 +97,11 @@ impl TyCtx {
         let mut this = Self {
             constraints: UnionFind::new(),
             substitutions: Vec::with_capacity(11),
+            mut_constraints: UnionFind::new(),
+            mut_substitutions: vec![
+                Some(Mutability::Constant),
+                Some(Mutability::Mutable),
+            ],
         };
         let mut type_scope = Scope::new(None);
         let unit_idx =
@@ -144,6 +164,38 @@ impl TyCtx {
         let idx = self.substitutions.len();
         self.substitutions.push(Either::Right(TypeVarKind::Integer));
         TypeIdx(idx)
+    }
+
+    fn new_mut_var(&mut self) -> MutIdx {
+        let idx = self.mut_substitutions.len();
+        self.mut_substitutions.push(None);
+        MutIdx(idx)
+    }
+
+    fn const_mutability(&self) -> MutIdx {
+        let mut_idx = MutIdx(0);
+        debug_assert!(matches!(
+            self.mut_substitutions[mut_idx.0],
+            Some(Mutability::Constant),
+        ));
+        mut_idx
+    }
+
+    fn mut_mutability(&self) -> MutIdx {
+        let mut_idx = MutIdx(1);
+        debug_assert!(matches!(
+            self.mut_substitutions[mut_idx.0],
+            Some(Mutability::Mutable),
+        ));
+        mut_idx
+    }
+
+    fn mutability(&self, mutable: bool) -> MutIdx {
+        if mutable {
+            self.mut_mutability()
+        } else {
+            self.const_mutability()
+        }
     }
 
     fn unit_type(&self) -> TypeIdx {
@@ -223,6 +275,15 @@ impl<'a> HirCtx<'a> {
         self.ty_ctx.substitutions.get(ty.0).and_then(|e| e.as_ref().left())
     }
 
+    /// Returns `None` if the given `MutIdx` is not a concrete mutability.
+    pub fn resolve_mut(&self, mutability: MutIdx) -> Option<bool> {
+        match self.ty_ctx.mut_substitutions.get(mutability.0) {
+            Some(Some(Mutability::Constant)) => Some(false),
+            Some(Some(Mutability::Mutable)) => Some(true),
+            None | Some(None) => None,
+        }
+    }
+
     fn new_parent(parent: &'a mut HirCtx<'_>) -> Self {
         Self {
             type_scope: Scope::new(Some(&parent.type_scope)),
@@ -297,18 +358,12 @@ impl<'a> HirCtx<'a> {
             }
             (Either::Left(tk1), Either::Left(tk2)) => match (&*tk1, &*tk2) {
                 (
-                    &TypeKind::Pointer { mutable: m1, pointee: p1 },
-                    &TypeKind::Pointer { mutable: m2, pointee: p2 },
+                    &TypeKind::Pointer { mutability: m1, pointee: p1 },
+                    &TypeKind::Pointer { mutability: m2, pointee: p2 },
                 ) => {
-                    if m1 != m2 {
-                        let mutability = |b| if b { "mut" } else { "const" };
-                        panic!(
-                            "cannot resolve *{} _ == *{} _",
-                            mutability(m1),
-                            mutability(m2)
-                        );
-                    }
-                    self.constrain_eq(p1, p2)
+                    let mut changed = self.constrain_mut_eq(m1, m2);
+                    changed |= self.constrain_eq(p1, p2);
+                    changed
                 }
                 (
                     &TypeKind::Slice { element: e1 },
@@ -401,13 +456,10 @@ impl<'a> HirCtx<'a> {
     ///
     /// Returns the `TypeIdx` of the pointee type in the second tuple
     /// element.
-    fn constrain_pointer(
-        &mut self, ty: TypeIdx, mutable: bool,
-    ) -> (bool, TypeIdx) {
+    fn constrain_pointer(&mut self, ty: TypeIdx) -> (bool, MutIdx, TypeIdx) {
         match self.ty_ctx.substitutions[ty.0] {
-            Either::Left(TypeKind::Pointer { pointee, mutable: m }) => {
-                assert_eq!(mutable, m, "cannot resolve *const _ == *mut _");
-                (false, pointee)
+            Either::Left(TypeKind::Pointer { pointee, mutability }) => {
+                (false, mutability, pointee)
             }
             Either::Left(ref tk) => {
                 panic!("cannot resolve {tk:?} == pointer")
@@ -417,9 +469,10 @@ impl<'a> HirCtx<'a> {
             }
             Either::Right(TypeVarKind::Normal) => {
                 let pointee = self.ty_ctx.new_var();
-                let tk = TypeKind::Pointer { mutable, pointee };
+                let mutability = self.ty_ctx.new_mut_var();
+                let tk = TypeKind::Pointer { mutability, pointee };
                 self.ty_ctx.substitutions[ty.0] = Either::Left(tk);
-                (true, pointee)
+                (true, mutability, pointee)
             }
         }
     }
@@ -547,6 +600,44 @@ impl<'a> HirCtx<'a> {
             }
             ref t => panic!("cannot resolve bool == {t:?}"),
         }
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    fn constrain_mut_eq(&mut self, m1: MutIdx, m2: MutIdx) -> bool {
+        dbg!();
+        let m1 = MutIdx(self.ty_ctx.mut_constraints.root_of(m1.0));
+        let m2 = MutIdx(self.ty_ctx.mut_constraints.root_of(m2.0));
+        if m1.0 == m2.0 {
+            return false;
+        }
+        let [m1k, m2k] =
+            self.ty_ctx.mut_substitutions.get_many_mut([m1.0, m2.0]).unwrap();
+        if let (Some(m1m), Some(m2m)) = (*m1k, *m2k) {
+            assert_eq!(m1m, m2m, "cannot resolve {m1m:?} == {m2m:?}");
+            false
+        } else {
+            if let Some(m) = Option::or(*m1k, *m2k) {
+                *m1k = Some(m);
+                *m2k = Some(m);
+                let m = match m {
+                    Mutability::Constant => self.ty_ctx.const_mutability(),
+                    Mutability::Mutable => self.ty_ctx.mut_mutability(),
+                };
+                self.ty_ctx.mut_constraints.union(m.0, m1.0);
+            }
+            self.ty_ctx.mut_constraints.union(m1.0, m2.0);
+            true
+        }
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    fn constrain_mutable(&mut self, m1: MutIdx) -> bool {
+        self.constrain_mut_eq(m1, self.ty_ctx.mut_mutability())
+    }
+
+    /// Returns `true` if a new constraint or substitution was added.
+    fn constrain_constant(&mut self, m1: MutIdx) -> bool {
+        self.constrain_mut_eq(m1, self.ty_ctx.const_mutability())
     }
 
     fn type_check_pattern_and_insert_locals(
@@ -761,6 +852,10 @@ pub struct StaticItem {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeIdx(usize);
 
+/// An index into `TyCtx`'s vector of mutabilities
+#[derive(Debug, Clone, Copy)]
+pub struct MutIdx(usize);
+
 #[derive(Debug)]
 pub struct FnParam {
     pub pattern: Pattern,
@@ -772,7 +867,7 @@ pub struct PointerSized;
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
-    Pointer { mutable: bool, pointee: TypeIdx },
+    Pointer { mutability: MutIdx, pointee: TypeIdx },
     Array { element: TypeIdx, length: usize },
     Slice { element: TypeIdx },
     Integer { signed: bool, bits: Either<u32, PointerSized> },
@@ -828,12 +923,21 @@ impl TypeIdx {
 #[derive(Debug)]
 pub enum Pattern {
     Wildcard,
-    Ident { mutable: bool, ident: Symbol },
-    Integer(Integer),
+    Ident {
+        mutable: bool,
+        ident: Symbol,
+    },
     Alt(Vec<Self>),
     Array(Vec<Self>),
     Tuple(Vec<Self>),
-    Range { start: Integer, inclusive: bool, end: Integer },
+    #[allow(unused)] // non-exhaustive patterns are not implemented
+    Integer(Integer),
+    #[allow(unused)] // non-exhaustive patterns are not implemented
+    Range {
+        start: Integer,
+        inclusive: bool,
+        end: Integer,
+    },
 }
 
 #[derive(Debug)]
@@ -903,7 +1007,10 @@ impl Expression {
             signed: true,
             bits: Either::Left(8),
         });
-        let const_i8_ptr = TypeKind::Pointer { mutable: false, pointee: i8 };
+        let const_i8_ptr = TypeKind::Pointer {
+            mutability: ctx.ty_ctx.const_mutability(),
+            pointee: i8,
+        };
         let type_ = ctx.ty_ctx.insert_type(const_i8_ptr);
         Expression { kind: ExpressionKind::StringLiteral(string), type_ }
     }
@@ -1178,7 +1285,9 @@ impl Lower for ast::Type {
         match self {
             ast::Type::Pointer { mutable, pointee } => {
                 let pointee = (*pointee).lower(ctx);
-                ctx.ty_ctx.insert_type(TypeKind::Pointer { mutable, pointee })
+                let mutability = ctx.ty_ctx.mutability(mutable);
+                ctx.ty_ctx
+                    .insert_type(TypeKind::Pointer { mutability, pointee })
             }
             ast::Type::Array { element, length } => {
                 let element = (*element).lower(ctx);
@@ -1790,20 +1899,21 @@ impl TypeCheck for Expression {
                     }
                     UnaryOp::AddrOf { mutable } => {
                         log::warn!("TODO: allow coercing from *mut to *const?");
-                        let (c, operand_ty) =
-                            ctx.constrain_pointer(self.type_, *mutable);
+                        let (c, mutability, operand_ty) =
+                            ctx.constrain_pointer(self.type_);
                         changed |= c;
                         changed |= ctx.constrain_eq(operand_ty, operand.type_);
+                        if !*mutable {
+                            // We can use `&mut x` to get `*const T`, but we
+                            // can't use `&x` to get `*mut T`
+                            changed |= ctx.constrain_constant(mutability);
+                        }
                     }
                     UnaryOp::Deref => {
-                        todo!(
-                            "constrain pointer without constraining \
-                             mutability?"
-                        );
-                        // let (c, pointee) =
-                        // ctx.constrain_pointer(operand.type_);
-                        // changed |= c;
-                        // changed |= ctx.constrain_eq(pointee, self.type_);
+                        let (c, _mutability, pointee) =
+                            ctx.constrain_pointer(operand.type_);
+                        changed |= c;
+                        changed |= ctx.constrain_eq(pointee, self.type_);
                     }
                     UnaryOp::AsCast { to_type } => {
                         changed |= ctx.constrain_eq(*to_type, self.type_);

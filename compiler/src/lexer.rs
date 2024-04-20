@@ -159,6 +159,7 @@ fn lex_until_closing_delimiter(
                     "unterminated string literal"
                 );
                 idx += 1;
+                data.push(0); // NUL-terminator
                 tokens.push(TokenTree::StringLiteral(StringLiteral {
                     data: Vec::leak(data),
                     span: Some((start..idx).into()),

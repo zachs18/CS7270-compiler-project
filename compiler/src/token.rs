@@ -142,6 +142,7 @@ pub struct Group {
 
 #[derive(Debug, Clone, Copy)]
 pub struct StringLiteral {
+    /// NUL-terminated
     pub data: &'static [u8],
     pub span: Option<Span>,
 }
