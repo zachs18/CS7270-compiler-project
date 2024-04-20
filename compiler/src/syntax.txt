@@ -8,9 +8,9 @@ FNITEM: 'extern'? 'fn' ident '(' list[FN_PARAM] '...'? ')' (BLOCK | ';')
 
 STATICITEM: 'extern'? 'static' 'mut'? ident ':' TYPE ( '=' EXPRESSION )? ';'
 
-FN_PARAM: PATTERN ':' TYPE
-// TODO: maybe `...` for variadics
+FN_PARAM: 'mut'? ident ':' TYPE
 
+// Note: non-exhaustive patterns (like integer and range patterns) are not (yet) supported.
 PATTERN:
  | '_'
  | ident
@@ -22,6 +22,7 @@ PATTERN:
 
 PATTERN_WITH_ALT: '|'? PATTERN ('|' PATTERN)*
 
+// Note: fn pointers aren't supported in syntax (yet).
 TYPE:
  | ident
  | '!'
@@ -55,6 +56,7 @@ EXPR_BLOCK:
 
 IF_EXPR: 'if' EXPR_NO_BLOCK BLOCK ( 'else' 'if' EXPR_NO_BLOCK BLOCK )* ('else' BLOCK)?
 
+// Note: match expressions are not (yet) supported.
 MATCH_EXPR: 'match' EXPR_NO_BLOCK '{' list[MATCH_ARM] '}'
 
 MATCH_ARM: PATTERN_WITH_ALT '=>' EXPRESSION

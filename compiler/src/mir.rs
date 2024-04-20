@@ -9,7 +9,7 @@ use either::Either;
 
 use crate::{
     ast::BinaryOp,
-    hir::{self, HirCtx, PointerSized, Symbol},
+    hir::{self, BlockLabel, HirCtx, PointerSized, Symbol},
     token::Ident,
     util::Scope,
 };
@@ -262,6 +262,57 @@ impl CompilationUnit {
         FmtType(self, ty)
     }
 
+    fn display_fn_args(&self, ty: TypeIdx) -> impl fmt::Display + '_ {
+        struct FmtFnArgs<'a>(&'a CompilationUnit, TypeIdx);
+
+        impl fmt::Display for FmtFnArgs<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let FmtFnArgs(this, ty) = *self;
+                let TypeKind::Function { ref params, return_type, is_variadic } =
+                    this.types[ty.0]
+                else {
+                    panic!("fn type is not a function?");
+                };
+
+                let mut params = params.iter().copied().enumerate();
+                if is_variadic {
+                    write!(f, "(")?;
+                    for (idx, param) in params {
+                        write!(
+                            f,
+                            "_{}: {}, ",
+                            idx + 1,
+                            this.display_type(param)
+                        )?;
+                    }
+                    write!(f, "...) -> {}", this.display_type(return_type))
+                } else {
+                    match params.next() {
+                        None => write!(
+                            f,
+                            "() -> {}",
+                            this.display_type(return_type)
+                        ),
+                        Some((_, first)) => {
+                            write!(f, "(_1: {}", this.display_type(first))?;
+                            for (idx, param) in params {
+                                write!(
+                                    f,
+                                    ", _{}: {}",
+                                    idx + 1,
+                                    this.display_type(param)
+                                )?;
+                            }
+                            write!(f, ") -> {}", this.display_type(return_type))
+                        }
+                    }
+                }
+            }
+        }
+
+        FmtFnArgs(self, ty)
+    }
+
     fn pretty_print_global(
         &self, name: &Symbol, ty: TypeIdx, kind: &GlobalKind,
         f: &mut fmt::Formatter<'_>,
@@ -298,9 +349,21 @@ impl CompilationUnit {
                 )?;
                 self.pretty_print_body(initializer, f)
             }
-            GlobalKind::DeclaredExternFn { .. } => todo!(),
-            GlobalKind::DefinedExternFn { ref body, .. } => todo!(),
-            GlobalKind::LocalFn { ref body, .. } => todo!(),
+            GlobalKind::DeclaredExternFn { .. } => {
+                writeln!(f, "    extern fn {name} = {};", self.display_type(ty))
+            }
+            GlobalKind::DefinedExternFn { ref body, .. } => {
+                write!(
+                    f,
+                    "    extern fn {name}{} = ",
+                    self.display_fn_args(ty)
+                )?;
+                self.pretty_print_body(body, f)
+            }
+            GlobalKind::LocalFn { ref body, .. } => {
+                write!(f, "    fn {name}{} = ", self.display_fn_args(ty))?;
+                self.pretty_print_body(body, f)
+            }
         }
     }
 
@@ -496,14 +559,18 @@ impl Body {
             basic_blocks: vec![initial_block, terminal_block],
         };
 
-        let mut values: Scope<Symbol, SlotIdx> = Scope::new(None);
+        let mut value_scope: Scope<Symbol, SlotIdx> = Scope::new(None);
+        let mut label_scope: Scope<BlockLabel, LabelDestination> =
+            Scope::new(None);
+
         // SlotIdx(0) is always the return value
         let initial_block_idx = lower_expression(
             initializer,
             ctx,
             SlotIdx(0),
             &mut this,
-            &mut values,
+            &mut value_scope,
+            &mut label_scope,
             BasicBlockIdx(1),
             compilation_unit,
         );
@@ -516,7 +583,7 @@ impl Body {
         body: &hir::Block, ctx: &HirCtx, args: &[hir::FnParam],
         compilation_unit: &mut CompilationUnit,
     ) -> Self {
-        todo!()
+        todo!();
     }
 
     fn insert_block(&mut self, block: BasicBlock) -> BasicBlockIdx {
@@ -561,8 +628,9 @@ impl Body {
 /// Returns the initial BasicBlockIdx.
 fn lower_block(
     block: &hir::Block, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
-    compilation_unit: &mut CompilationUnit,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
     // 4 cases:
     // * no statements, no tail: assign () to dst
@@ -583,6 +651,7 @@ fn lower_block(
                 dst,
                 body,
                 value_scope,
+                label_scope,
                 next_block,
                 compilation_unit,
             )
@@ -599,6 +668,7 @@ fn lower_block(
                     ctx,
                     body,
                     value_scope,
+                    label_scope,
                     next_block,
                     compilation_unit,
                 );
@@ -630,6 +700,7 @@ fn lower_block(
                     ctx,
                     body,
                     value_scope,
+                    label_scope,
                     next_block,
                     compilation_unit,
                 );
@@ -643,6 +714,7 @@ fn lower_block(
                 dst,
                 body,
                 value_scope,
+                label_scope,
                 next_block,
                 compilation_unit,
             );
@@ -653,14 +725,20 @@ fn lower_block(
     }
 }
 
+struct LabelDestination {
+    break_dst: BasicBlockIdx,
+    continue_dst: Option<BasicBlockIdx>,
+}
+
 /// Lowers an expression into BasicBlocks which evaluate the expression,
 /// write the result to `dst`, and then jump to `next_block`.
 ///
 /// Returns the initial BasicBlockIdx.
 fn lower_expression(
     expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
-    compilation_unit: &mut CompilationUnit,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
     match &expr.kind {
         hir::ExpressionKind::Ident(name) => {
@@ -748,6 +826,7 @@ fn lower_expression(
                         lhs_slot,
                         body,
                         value_scope,
+                        label_scope,
                         bb1,
                         compilation_unit,
                     );
@@ -757,6 +836,7 @@ fn lower_expression(
                         rhs_slot,
                         body,
                         value_scope,
+                        label_scope,
                         bb3,
                         compilation_unit,
                     );
@@ -800,11 +880,12 @@ fn lower_expression(
             let switch_block_idx = body.temp_block();
             let condition_slot = body.new_slot(compilation_unit.bool_type());
             let evaluate_condition_block = lower_expression(
-                &condition,
+                condition,
                 ctx,
                 condition_slot,
                 body,
                 value_scope,
+                label_scope,
                 switch_block_idx,
                 compilation_unit,
             );
@@ -814,6 +895,7 @@ fn lower_expression(
                 dst,
                 body,
                 value_scope,
+                label_scope,
                 next_block,
                 compilation_unit,
             );
@@ -826,6 +908,7 @@ fn lower_expression(
                     dst,
                     body,
                     value_scope,
+                    label_scope,
                     next_block,
                     compilation_unit,
                 ),
@@ -840,7 +923,9 @@ fn lower_expression(
             evaluate_condition_block
         }
         hir::ExpressionKind::Loop { .. } => todo!(),
-        hir::ExpressionKind::Block { .. } => todo!(),
+        hir::ExpressionKind::Block { label, body } => {
+            todo!()
+        }
         hir::ExpressionKind::Match { scrutinee, arms } => {
             unimplemented!("match expressions not implemented")
         }
@@ -862,10 +947,30 @@ fn lower_expression(
 /// Returns the initial BasicBlockIdx.
 fn lower_statement(
     stmt: &hir::Statement, ctx: &HirCtx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>, next_block: BasicBlockIdx,
-    compilation_unit: &mut CompilationUnit,
+    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
-    todo!()
+    match stmt {
+        hir::Statement::LetStatement { pattern, type_, initializer } => todo!(),
+        hir::Statement::Expression { expression, .. } => {
+            // This slot is not referenced by anything else, so it will be
+            // optimized out with dead-local-store elimination enabled (once
+            // that is implemented).
+            let dst = body
+                .new_slot(compilation_unit.lower_type(expression.type_, ctx));
+            lower_expression(
+                expression,
+                ctx,
+                dst,
+                body,
+                value_scope,
+                label_scope,
+                next_block,
+                compilation_unit,
+            )
+        }
+    }
 }
 
 /// Index into Body::slots
