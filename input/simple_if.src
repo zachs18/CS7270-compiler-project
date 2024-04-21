@@ -1,0 +1,12 @@
+extern fn bad_fizzbuzz(x: i32) -> i32 {
+    if x % 15 == 0 {
+        15
+    } else if x % 3 == 0 {
+        3
+    } else if x % 5 == 0 {
+        5
+    } else {
+        1
+    }
+}
+

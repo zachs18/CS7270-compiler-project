@@ -983,8 +983,76 @@ fn lower_pattern(
 }
 
 struct LabelDestination {
+    /// Where to jump to after a `break`.
     break_dst: BasicBlockIdx,
+    /// Where to write the value to before jumping to `break_dst`.
+    break_value_slot: SlotIdx,
+    /// Where to jump to after a `continue`.
     continue_dst: Option<BasicBlockIdx>,
+}
+
+/// Lower a non-short-circuiting Arithmetic or Comparison BinaryOp expression.
+fn lower_normal_binary_op_expression(
+    lhs: &hir::Expression, rhs: &hir::Expression, op: BinaryOp, ctx: &HirCtx,
+    dst: SlotIdx, body: &mut Body,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
+    label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    // bb0 {
+    //  lhs_slot = evaluate lhs;
+    //  goto -> bb1;
+    // }
+    // bb1 {
+    //  goto -> bb2;
+    // }
+    // bb2 {
+    //  rhs_slot = evaluate rhs;
+    //  goto -> bb3;
+    // }
+    // bb3 {
+    //  _0 = Add(lhs_slot, rhs_slot); // or whatever op
+    //  goto -> next_block;
+    // }
+    let lhs_slot = body.new_slot(compilation_unit.lower_type(lhs.type_, ctx));
+    let rhs_slot = body.new_slot(compilation_unit.lower_type(rhs.type_, ctx));
+    let bb1 = body.temp_block();
+    let bb3 = body.temp_block();
+    let bb0 = lower_expression(
+        lhs,
+        ctx,
+        lhs_slot,
+        body,
+        value_scope,
+        label_scope,
+        bb1.as_basic_block_idx(),
+        compilation_unit,
+    );
+    let bb2 = lower_expression(
+        rhs,
+        ctx,
+        rhs_slot,
+        body,
+        value_scope,
+        label_scope,
+        bb3.as_basic_block_idx(),
+        compilation_unit,
+    );
+    bb1.update(body, vec![], Terminator::Goto { target: bb2 });
+    bb3.update(
+        body,
+        vec![BasicOperation::Assign(
+            Place::from(dst),
+            Value::BinaryOp(
+                op,
+                Operand::Copy(Place::from(lhs_slot)),
+                Operand::Copy(Place::from(rhs_slot)),
+            ),
+        )],
+        Terminator::Goto { target: next_block },
+    );
+
+    bb0
 }
 
 /// Lowers an expression into BasicBlocks which evaluate the expression,
@@ -1162,65 +1230,34 @@ fn lower_expression(
                 if arith_op.is_short_circuit() {
                     todo!("short-circuiting ops");
                 } else {
-                    // bb0 {
-                    //  lhs_slot = evaluate lhs;
-                    //  goto -> bb1;
-                    // }
-                    // bb1 {
-                    //  goto -> bb2;
-                    // }
-                    // bb2 {
-                    //  rhs_slot = evaluate rhs;
-                    //  goto -> bb3;
-                    // }
-                    // bb3 {
-                    //  _0 = Add(lhs_slot, rhs_slot); // or whatever op
-                    //  goto -> next_block;
-                    // }
-                    let lhs_slot = body
-                        .new_slot(compilation_unit.lower_type(lhs.type_, ctx));
-                    let rhs_slot = body
-                        .new_slot(compilation_unit.lower_type(rhs.type_, ctx));
-                    let mut bb1 = body.temp_block();
-                    let mut bb3 = body.temp_block();
-                    let bb0 = lower_expression(
+                    lower_normal_binary_op_expression(
                         lhs,
-                        ctx,
-                        lhs_slot,
-                        body,
-                        value_scope,
-                        label_scope,
-                        bb1.as_basic_block_idx(),
-                        compilation_unit,
-                    );
-                    let bb2 = lower_expression(
                         rhs,
+                        *op,
                         ctx,
-                        rhs_slot,
+                        dst,
                         body,
                         value_scope,
                         label_scope,
-                        bb3.as_basic_block_idx(),
+                        next_block,
                         compilation_unit,
-                    );
-                    bb1.update(body, vec![], Terminator::Goto { target: bb2 });
-                    bb3.update(
-                        body,
-                        vec![BasicOperation::Assign(
-                            Place::from(dst),
-                            Value::BinaryOp(
-                                *op,
-                                Operand::Copy(Place::from(lhs_slot)),
-                                Operand::Copy(Place::from(rhs_slot)),
-                            ),
-                        )],
-                        Terminator::Goto { target: next_block },
-                    );
-
-                    bb0
+                    )
                 }
             }
-            crate::ast::BinaryOp::Comparison(_) => todo!(),
+            crate::ast::BinaryOp::Comparison(_) => {
+                lower_normal_binary_op_expression(
+                    lhs,
+                    rhs,
+                    *op,
+                    ctx,
+                    dst,
+                    body,
+                    value_scope,
+                    label_scope,
+                    next_block,
+                    compilation_unit,
+                )
+            }
             crate::ast::BinaryOp::RangeOp { end_inclusive } => todo!(),
         },
         hir::ExpressionKind::If { condition, then_block, else_block } => {
@@ -1287,9 +1324,59 @@ fn lower_expression(
             );
             evaluate_condition_block
         }
-        hir::ExpressionKind::Loop { .. } => todo!(),
-        hir::ExpressionKind::Block { label, body } => {
-            todo!()
+        hir::ExpressionKind::Loop { label, body: block } => {
+            let initial_block = body.temp_block();
+            let mut label_scope = Scope::new(Some(label_scope));
+            let (label) = label.expect("Loop should have label");
+            label_scope.insert(
+                label,
+                LabelDestination {
+                    break_dst: next_block,
+                    break_value_slot: dst,
+                    continue_dst: Some(initial_block.as_basic_block_idx()),
+                },
+            );
+
+            let block_dst = body.new_slot(compilation_unit.unit_type());
+
+            let body_initial_idx = lower_block(
+                block,
+                ctx,
+                block_dst,
+                body,
+                value_scope,
+                &mut label_scope,
+                initial_block.as_basic_block_idx(),
+                compilation_unit,
+            );
+            initial_block.update(
+                body,
+                vec![],
+                Terminator::Goto { target: body_initial_idx },
+            )
+        }
+        hir::ExpressionKind::Block { label, body: block } => {
+            let mut label_scope = Scope::new(Some(label_scope));
+            if let &Some(label) = label {
+                label_scope.insert(
+                    label,
+                    LabelDestination {
+                        break_dst: next_block,
+                        break_value_slot: dst,
+                        continue_dst: None,
+                    },
+                );
+            }
+            lower_block(
+                block,
+                ctx,
+                dst,
+                body,
+                value_scope,
+                &mut label_scope,
+                next_block,
+                compilation_unit,
+            )
         }
         hir::ExpressionKind::Match { scrutinee, arms } => {
             unimplemented!("match expressions not implemented")
@@ -1298,11 +1385,19 @@ fn lower_expression(
             "wildcard expressions should only happen in the lhs of assignment \
              ops, which should not use lower_expression"
         ),
-        hir::ExpressionKind::Index { base, index } => todo!(),
-        hir::ExpressionKind::Call { function, args } => todo!(),
-        hir::ExpressionKind::Break { label, value } => todo!(),
-        hir::ExpressionKind::Return { value } => todo!(),
-        &hir::ExpressionKind::Continue { label } => todo!(),
+        hir::ExpressionKind::Index { base, index } => {
+            todo!("lower indexing to MIR")
+        }
+        hir::ExpressionKind::Call { function, args } => {
+            todo!("lower calls to MIR")
+        }
+        hir::ExpressionKind::Break { label, value } => {
+            todo!("lower break to MIR")
+        }
+        hir::ExpressionKind::Return { value } => todo!("lower return to MIR"),
+        hir::ExpressionKind::Continue { label } => {
+            todo!("lower continue to MIR")
+        }
     }
 }
 

@@ -2016,9 +2016,12 @@ impl TypeCheck for Expression {
                         .is_none(),
                     "cannot shadow label {label:?}"
                 );
-                let changed = body.type_check(ctx);
+                let mut changed = body.type_check(ctx);
+                let ty = body.type_(ctx);
+                changed |= ctx.constrain_unit(ty);
                 ctx.labeled_block_types.remove(&label);
                 ctx.nested_loop_labels.pop();
+
                 changed
             }
             ExpressionKind::Block { label, body } => {
