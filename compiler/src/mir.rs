@@ -6,14 +6,16 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    mem::ManuallyDrop,
     sync::Arc,
 };
 
 use either::Either;
+use itertools::Itertools;
 
 use crate::{
     ast::BinaryOp,
-    hir::{self, BlockLabel, HirCtx, PointerSized, Symbol},
+    hir::{self, BlockLabel, HirCtx, Mutability, PointerSized, Symbol},
     token::Ident,
     util::Scope,
 };
@@ -614,7 +616,8 @@ impl Body {
             basic_blocks: vec![initial_block, terminal_block],
         };
 
-        let mut value_scope: Scope<Symbol, SlotIdx> = Scope::new(None);
+        let mut value_scope: Scope<Symbol, (Mutability, SlotIdx)> =
+            Scope::new(None);
         let mut label_scope: Scope<BlockLabel, LabelDestination> =
             Scope::new(None);
         let initial_block = BasicBlockIdx(0);
@@ -628,7 +631,7 @@ impl Body {
             &mut this,
             &mut value_scope,
             &mut label_scope,
-            BasicBlockIdx(1),
+            terminal_block,
             compilation_unit,
         );
         this.basic_blocks[initial_block.0].terminator =
@@ -637,52 +640,81 @@ impl Body {
     }
 
     fn new_for_fn(
-        body: &hir::Block, ctx: &HirCtx, args: &[hir::FnParam],
+        fn_body: &hir::Block, ctx: &HirCtx, args: &[hir::FnParam],
         return_type: hir::TypeIdx, compilation_unit: &mut CompilationUnit,
     ) -> Self {
         let return_type = compilation_unit.lower_type(return_type, ctx);
 
+        let mut body = Body { slots: vec![return_type], basic_blocks: vec![] };
+
         // The initial BasicBlock. This will be overwritten with a Goto
         // terminator for the fn body's initial block.
-        let initial_block = BasicBlock {
-            operations: vec![],
-            terminator: Terminator::Unreachable,
-        };
+        let initial_block = body.temp_block();
+
         // The terminal BasicBlock. This is given as the destination block when
         // lowering the fn body.
-        let terminal_block =
-            BasicBlock { operations: vec![], terminator: Terminator::Return };
-        let mut this = Body {
-            slots: vec![return_type],
-            basic_blocks: vec![initial_block, terminal_block],
-        };
-        let initial_block = BasicBlockIdx(0);
-        let terminal_block = BasicBlockIdx(1);
+        let terminal_block = body.insert_block(BasicBlock {
+            operations: vec![],
+            terminator: Terminator::Return,
+        });
 
-        let mut value_scope: Scope<Symbol, SlotIdx> = Scope::new(None);
+        let mut value_scope: Scope<Symbol, (Mutability, SlotIdx)> =
+            Scope::new(None);
         let mut label_scope: Scope<BlockLabel, LabelDestination> =
             Scope::new(None);
 
-        // First, we lower the param patterns
-        for paran in args {
-            todo!();
+        // First, we make slots for parameters
+        let param_slots_and_tys = args
+            .iter()
+            .map(|param| {
+                let ty = compilation_unit.lower_type(param.type_, ctx);
+                let slot = body.new_slot(ty);
+                (slot, ty)
+            })
+            .collect_vec();
+
+        // Then, we lower the param patterns into locals
+        let mut prev_intermediate_block = initial_block;
+        for (param, (src_slot, _)) in std::iter::zip(args, param_slots_and_tys)
+        {
+            let next_intermediate_block = body.temp_block();
+            let pattern_block_idx = lower_pattern(
+                &param.pattern,
+                ctx,
+                src_slot,
+                &mut body,
+                &mut value_scope,
+                next_intermediate_block.as_basic_block_idx(),
+                compilation_unit,
+            );
+            prev_intermediate_block.update(
+                &mut body,
+                vec![],
+                Terminator::Goto { target: pattern_block_idx },
+            );
+            prev_intermediate_block = next_intermediate_block;
         }
+        let after_pattern_block = prev_intermediate_block;
 
         // The we lower the body
         // SlotIdx(0) is always the return value
         let body_initial_block = lower_block(
-            body,
+            fn_body,
             ctx,
             SlotIdx(0),
-            &mut this,
+            &mut body,
             &mut value_scope,
             &mut label_scope,
             terminal_block,
             compilation_unit,
         );
-        this.basic_blocks[initial_block.0].terminator =
-            Terminator::Goto { target: body_initial_block };
-        this
+
+        after_pattern_block.update(
+            &mut body,
+            vec![],
+            Terminator::Goto { target: body_initial_block },
+        );
+        body
     }
 
     fn insert_block(&mut self, block: BasicBlock) -> BasicBlockIdx {
@@ -707,11 +739,13 @@ impl Body {
     /// Used to create a temporary basic block that will be updated later, when
     /// you need to have a destination for something before the destination is
     /// made.
-    fn temp_block(&mut self) -> BasicBlockIdx {
-        self.insert_block(BasicBlock {
+    #[track_caller]
+    fn temp_block(&mut self) -> TempBlockIdx {
+        let BasicBlockIdx(idx) = self.insert_block(BasicBlock {
             operations: vec![],
             terminator: Terminator::Error,
-        })
+        });
+        TempBlockIdx(std::panic::Location::caller(), idx)
     }
 
     fn new_slot(&mut self, ty: TypeIdx) -> SlotIdx {
@@ -721,13 +755,39 @@ impl Body {
     }
 }
 
+struct TempBlockIdx(&'static std::panic::Location<'static>, usize);
+
+impl Drop for TempBlockIdx {
+    fn drop(&mut self) {
+        panic!(
+            "temp block {} (created at {}) dropped without being updated",
+            self.1, self.0
+        );
+    }
+}
+
+impl TempBlockIdx {
+    fn update(
+        self, body: &mut Body, operations: Vec<BasicOperation>,
+        terminator: Terminator,
+    ) -> BasicBlockIdx {
+        let this = ManuallyDrop::new(self);
+        body.basic_blocks[this.1] = BasicBlock { operations, terminator };
+        BasicBlockIdx(this.1)
+    }
+
+    fn as_basic_block_idx(&self) -> BasicBlockIdx {
+        BasicBlockIdx(self.1)
+    }
+}
+
 /// Lowers a block into BasicBlocks which evaluate the block, write the
 /// result to `dst`, and then jump to `next_block`.
 ///
 /// Returns the initial BasicBlockIdx.
 fn lower_block(
     block: &hir::Block, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
@@ -760,7 +820,7 @@ fn lower_block(
             // jumping to the next  statement. The last temp block is replaced
             // with the _dst = () block, and then jumps to `next_block`.
             let mut temp_block = body.temp_block();
-            let initial_block = temp_block;
+            let initial_block = temp_block.as_basic_block_idx();
             for stmt in statements {
                 let dst = lower_statement(
                     stmt,
@@ -771,20 +831,24 @@ fn lower_block(
                     next_block,
                     compilation_unit,
                 );
-                body.basic_blocks[temp_block.0].terminator =
-                    Terminator::Goto { target: dst };
+                temp_block.update(
+                    body,
+                    vec![],
+                    Terminator::Goto { target: dst },
+                );
                 temp_block = body.temp_block();
             }
-            body.basic_blocks[temp_block.0].operations.push(
-                BasicOperation::Assign(
+
+            temp_block.update(
+                body,
+                vec![BasicOperation::Assign(
                     Place::from(dst),
                     Value::Operand(Operand::Constant(Constant::Tuple(
                         Arc::new([]),
                     ))),
-                ),
+                )],
+                Terminator::Goto { target: next_block },
             );
-            body.basic_blocks[temp_block.0].terminator =
-                Terminator::Goto { target: next_block };
             initial_block
         }
         hir::Block { statements, tail: Some(tail) } => {
@@ -792,7 +856,7 @@ fn lower_block(
             // jumping to the next  statement. The last temp block jumps to the
             // expression evaluation, which then jumps to `next_block`.
             let mut temp_block = body.temp_block();
-            let initial_block = temp_block;
+            let initial_block = temp_block.as_basic_block_idx();
             for stmt in statements {
                 let dst = lower_statement(
                     stmt,
@@ -803,8 +867,11 @@ fn lower_block(
                     next_block,
                     compilation_unit,
                 );
-                body.basic_blocks[temp_block.0].terminator =
-                    Terminator::Goto { target: dst };
+                temp_block.update(
+                    body,
+                    vec![],
+                    Terminator::Goto { target: dst },
+                );
                 temp_block = body.temp_block();
             }
             let expr_block = lower_expression(
@@ -817,9 +884,57 @@ fn lower_block(
                 next_block,
                 compilation_unit,
             );
-            body.basic_blocks[temp_block.0].terminator =
-                Terminator::Goto { target: expr_block };
+
+            temp_block.update(
+                body,
+                vec![BasicOperation::Assign(
+                    Place::from(dst),
+                    Value::Operand(Operand::Constant(Constant::Tuple(
+                        Arc::new([]),
+                    ))),
+                )],
+                Terminator::Goto { target: expr_block },
+            );
             initial_block
+        }
+    }
+}
+
+/// Lowers the evaluation of matching a pattern against a source to basic
+/// blocks.
+///
+/// Locals will be inserted for `ident` patterns.
+///
+/// Returns the initial BasicBlock. If no basic blocks are required to lower the
+/// pattern matching (e.g. for wildcard or ident patterns), then `next_block`
+/// may be returned.
+fn lower_pattern(
+    pattern: &hir::Pattern, ctx: &HirCtx, src: SlotIdx, body: &mut Body,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    let src_ty = body.slots[src.0];
+    match pattern {
+        hir::Pattern::Wildcard => {
+            // Don't actually need to do anything
+            next_block
+        }
+        &hir::Pattern::Ident { mutability, ident } => {
+            // Don't actually need to do anything other than check that there's
+            // no duplicate local variable
+            assert!(
+                value_scope.insert(ident, (mutability, src)).is_none(),
+                "duplicate local {ident}"
+            );
+            next_block
+        }
+        hir::Pattern::Array(_) => todo!(),
+        hir::Pattern::Tuple(_) => todo!(),
+        hir::Pattern::Alt(_) => {
+            unimplemented!("alt-patterns are not implemented")
+        }
+        hir::Pattern::Integer(_) | hir::Pattern::Range { .. } => {
+            unimplemented!("non-exhaustive patterns are not implemented")
         }
     }
 }
@@ -835,7 +950,7 @@ struct LabelDestination {
 /// Returns the initial BasicBlockIdx.
 fn lower_expression(
     expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
@@ -844,7 +959,7 @@ fn lower_expression(
     match &orig_expr.kind {
         hir::ExpressionKind::Ident(name) => {
             let ops = match value_scope.lookup(name) {
-                Some(&local) => vec![BasicOperation::Assign(
+                Some(&(_, local)) => vec![BasicOperation::Assign(
                     Place::from(dst),
                     Value::Operand(Operand::Copy(Place::from(local))),
                 )],
@@ -974,19 +1089,21 @@ fn lower_expression(
                     body,
                     value_scope,
                     label_scope,
-                    deref_block,
+                    deref_block.as_basic_block_idx(),
                     compilation_unit,
                 );
-                body.basic_blocks[deref_block.0] = BasicBlock {
-                    operations: vec![BasicOperation::Assign(
+
+                deref_block.update(
+                    body,
+                    vec![BasicOperation::Assign(
                         Place::from(dst),
                         Value::Operand(Operand::Copy(Place {
                             local: operand_slot,
                             projections: vec![PlaceProjection::Deref],
                         })),
                     )],
-                    terminator: Terminator::Goto { target: next_block },
-                };
+                    Terminator::Goto { target: next_block },
+                );
                 initial_block
             }
             hir::UnaryOp::AsCast { to_type } => todo!(),
@@ -1030,32 +1147,31 @@ fn lower_expression(
                         body,
                         value_scope,
                         label_scope,
-                        bb1,
+                        bb1.as_basic_block_idx(),
                         compilation_unit,
                     );
                     let bb2 = lower_expression(
-                        lhs,
+                        rhs,
                         ctx,
                         rhs_slot,
                         body,
                         value_scope,
                         label_scope,
-                        bb3,
+                        bb3.as_basic_block_idx(),
                         compilation_unit,
                     );
-                    body.basic_blocks[bb1.0].terminator =
-                        Terminator::Goto { target: bb2 };
-                    body.basic_blocks[bb3.0].terminator =
-                        Terminator::Goto { target: next_block };
-                    body.basic_blocks[bb3.0].operations.push(
-                        BasicOperation::Assign(
+                    bb1.update(body, vec![], Terminator::Goto { target: bb2 });
+                    bb3.update(
+                        body,
+                        vec![BasicOperation::Assign(
                             Place::from(dst),
                             Value::BinaryOp(
                                 *op,
                                 Operand::Copy(Place::from(lhs_slot)),
                                 Operand::Copy(Place::from(rhs_slot)),
                             ),
-                        ),
+                        )],
+                        Terminator::Goto { target: next_block },
                     );
 
                     bb0
@@ -1089,7 +1205,7 @@ fn lower_expression(
                 body,
                 value_scope,
                 label_scope,
-                switch_block_idx,
+                switch_block_idx.as_basic_block_idx(),
                 compilation_unit,
             );
             let then_block_idx = lower_block(
@@ -1117,12 +1233,15 @@ fn lower_expression(
                 ),
                 None => body.insert_assign_unit_block(dst, next_block),
             };
-            body.basic_blocks[switch_block_idx.0].terminator =
+            switch_block_idx.update(
+                body,
+                vec![],
                 Terminator::SwitchBool {
                     scrutinee: condition_slot,
                     true_dst: then_block_idx,
                     false_dst: else_block_idx,
-                };
+                },
+            );
             evaluate_condition_block
         }
         hir::ExpressionKind::Loop { .. } => todo!(),
@@ -1150,7 +1269,7 @@ fn lower_expression(
 /// Returns the initial BasicBlockIdx.
 fn lower_statement(
     stmt: &hir::Statement, ctx: &HirCtx, body: &mut Body,
-    value_scope: &mut Scope<'_, Symbol, SlotIdx>,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {

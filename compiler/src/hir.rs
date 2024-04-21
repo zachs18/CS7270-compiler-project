@@ -63,9 +63,17 @@ enum TypeVarKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mutability {
+pub enum Mutability {
     Constant,
     Mutable,
+}
+impl Mutability {
+    fn from_bool(mutable: bool) -> Mutability {
+        match mutable {
+            false => Mutability::Constant,
+            true => Mutability::Mutable,
+        }
+    }
 }
 
 struct TyCtx {
@@ -924,7 +932,7 @@ impl TypeIdx {
 pub enum Pattern {
     Wildcard,
     Ident {
-        mutable: bool,
+        mutability: Mutability,
         ident: Symbol,
     },
     Alt(Vec<Self>),
@@ -1486,7 +1494,7 @@ impl Lower for ast::Expression {
 
                 let let_start_stmt = Statement::LetStatement {
                     pattern: Pattern::Ident {
-                        mutable: false,
+                        mutability: Mutability::Constant,
                         ident: start_ident,
                     },
                     type_: start.type_,
@@ -1494,7 +1502,7 @@ impl Lower for ast::Expression {
                 };
                 let let_end_stmt = Statement::LetStatement {
                     pattern: Pattern::Ident {
-                        mutable: false,
+                        mutability: Mutability::Constant,
                         ident: end_ident,
                     },
                     type_: end.type_,
@@ -1502,7 +1510,7 @@ impl Lower for ast::Expression {
                 };
                 let let_i_stmt = Statement::LetStatement {
                     pattern: Pattern::Ident {
-                        mutable: true,
+                        mutability: Mutability::Mutable,
                         ident: iter_ident,
                     },
                     type_: ctx.ty_ctx.new_var(),
@@ -1673,9 +1681,10 @@ impl Lower for ast::Pattern {
     fn lower(self, ctx: &mut HirCtx) -> Self::Output {
         match self {
             ast::Pattern::Wildcard => Pattern::Wildcard,
-            ast::Pattern::Ident { mutable, ident } => {
-                Pattern::Ident { mutable, ident: Symbol::Ident(ident) }
-            }
+            ast::Pattern::Ident { mutable, ident } => Pattern::Ident {
+                mutability: Mutability::from_bool(mutable),
+                ident: Symbol::Ident(ident),
+            },
             ast::Pattern::Integer(integer) => Pattern::Integer(integer),
             ast::Pattern::Alt(orig_patterns) => {
                 // Collapse parenthesized alt patterns.
