@@ -745,6 +745,7 @@ impl Body {
             operations: vec![],
             terminator: Terminator::Error,
         });
+        // TODO: once we're done, maybe remove the Location field
         TempBlockIdx(std::panic::Location::caller(), idx)
     }
 
@@ -920,13 +921,21 @@ fn lower_pattern(
             next_block
         }
         &hir::Pattern::Ident { mutability, ident } => {
-            // Don't actually need to do anything other than check that there's
-            // no duplicate local variable
+            // Create a new slot for the new variable, and insert an assignment
+            // operation
             assert!(
                 value_scope.insert(ident, (mutability, src)).is_none(),
                 "duplicate local {ident}"
             );
-            next_block
+            let new_slot = body.new_slot(src_ty);
+            let op = BasicOperation::Assign(
+                Place::from(new_slot),
+                Value::Operand(Operand::Copy(Place::from(src))),
+            );
+            body.insert_block(BasicBlock {
+                operations: vec![op],
+                terminator: Terminator::Goto { target: next_block },
+            })
         }
         hir::Pattern::Array(_) => todo!(),
         hir::Pattern::Tuple(_) => todo!(),
