@@ -1,0 +1,13 @@
+extern fn printf(format: *const i8, ...);
+
+extern fn fizzbuzz(x: i32) {
+    if x % 15 == 0 {
+        printf("fizzbuzz\n");
+    } else if x % 3 == 0 {
+        printf("fizz\n");
+    } else if x % 5 == 0 {
+        printf("buzz\n");
+    } else {
+        printf("%d\n", x);
+    }
+}

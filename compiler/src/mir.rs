@@ -20,6 +20,10 @@ use crate::{
     util::Scope,
 };
 
+use self::optimizations::MirOptimization;
+
+pub mod optimizations;
+
 /// Lower type-checked hir to mir
 pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
     let mut compilation_unit = CompilationUnit::new();
@@ -50,9 +54,11 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 extern_token: None,
                 body: None,
                 ..
-            }) => unreachable!(
-                "fn item {name:?} must be extern, have a body, or both"
-            ),
+            }) => {
+                unreachable!(
+                    "fn item {name:?} must be extern, have a body, or both"
+                )
+            }
             hir::Item::StaticItem(hir::StaticItem {
                 name,
                 extern_token: None,
@@ -540,6 +546,24 @@ impl CompilationUnit {
         self.globals.insert(symbol, (idx, ty));
         (symbol, idx)
     }
+
+    pub fn apply_optimization(&mut self, opt: impl MirOptimization) -> bool {
+        self.items
+            .iter_mut()
+            .filter_map(|item| item.as_mut().left())
+            .map(|item| match item {
+                ItemKind::DeclaredExternStatic { .. } => false,
+                ItemKind::StringLiteral { .. } => false,
+                ItemKind::DeclaredExternFn { .. } => false,
+                ItemKind::DefinedExternStatic { initializer, .. }
+                | ItemKind::LocalStatic { initializer, .. } => {
+                    opt.apply(initializer)
+                }
+                ItemKind::DefinedExternFn { body, .. }
+                | ItemKind::LocalFn { body, .. } => opt.apply(body),
+            })
+            .fold(false, |a, b| a || b)
+    }
 }
 
 /// Index into `CompilationUnit::types`.
@@ -583,7 +607,7 @@ enum ItemKindStub {
 }
 
 #[derive(Debug)]
-struct Body {
+pub struct Body {
     /// Local variable/temporary slots.
     ///
     /// The return value is always in slot 0.
@@ -760,10 +784,18 @@ struct TempBlockIdx(&'static std::panic::Location<'static>, usize);
 
 impl Drop for TempBlockIdx {
     fn drop(&mut self) {
-        panic!(
-            "temp block {} (created at {}) dropped without being updated",
-            self.1, self.0
-        );
+        if !std::thread::panicking() {
+            panic!(
+                "temp block {} (created at {}) dropped without being updated",
+                self.1, self.0
+            );
+        } else {
+            eprintln!(
+                "temp block {} (created at {}) dropped without being updated \
+                 (while panicking)",
+                self.1, self.0
+            );
+        }
     }
 }
 
@@ -937,7 +969,9 @@ fn lower_pattern(
                 terminator: Terminator::Goto { target: next_block },
             })
         }
-        hir::Pattern::Array(_) => todo!(),
+        hir::Pattern::Array(patterns) => {
+            todo!()
+        }
         hir::Pattern::Tuple(_) => todo!(),
         hir::Pattern::Alt(_) => {
             unimplemented!("alt-patterns are not implemented")
@@ -1305,11 +1339,11 @@ fn lower_statement(
 }
 
 /// Index into Body::slots
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct SlotIdx(usize);
 
 /// Index into Body::basic_blocks
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BasicBlockIdx(usize);
 
 #[derive(Debug)]
@@ -1371,11 +1405,13 @@ impl fmt::Display for Terminator {
                 .field("equal_dst", equal_dst)
                 .field("greater_dst", greater_dst)
                 .finish(),
-            Self::Call { func, args, return_destination, target } => write!(
-                f,
-                "{} = {}(todo: args) -> bb{}",
-                return_destination, func, target.0
-            ),
+            Self::Call { func, args, return_destination, target } => {
+                write!(
+                    f,
+                    "{} = {}(todo: args) -> bb{}",
+                    return_destination, func, target.0
+                )
+            }
         }
     }
 }

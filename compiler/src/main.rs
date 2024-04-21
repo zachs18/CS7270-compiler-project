@@ -23,8 +23,7 @@ fn usage() -> ExitCode {
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     )
     .format(|buf, record| {
         use std::io::Write;
@@ -73,9 +72,26 @@ fn main() -> ExitCode {
 
     dbg!(&hir);
 
-    let mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
+    let mut mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
 
+    println!("pre-opt: ");
     println!("{mir}");
+
+    println!();
+
+    mir.apply_optimization(mir::optimizations::CombineBlocks);
+
+    println!("post-CombineBlocks: ");
+    println!("{mir}");
+
+    println!();
+
+    mir.apply_optimization(mir::optimizations::TrimUnreachable);
+
+    println!("post-CombineBlocks: ");
+    println!("{mir}");
+
+    println!();
 
     ExitCode::SUCCESS
 }
