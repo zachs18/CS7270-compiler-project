@@ -2,6 +2,7 @@ use std::{
     borrow::Borrow,
     cell::Cell,
     collections::{hash_map::Entry, HashMap},
+    fmt::{self, Debug},
     hash::Hash,
     ops::{Deref, DerefMut},
 };
@@ -160,6 +161,43 @@ impl<T> DerefMut for MaybeOwned<'_, T> {
             MaybeOwned::Owned(value) => value,
             MaybeOwned::Borrowed(value) => value,
         }
+    }
+}
+
+pub struct FmtSlice<'a, T> {
+    separator: &'a str,
+    data: &'a [T],
+}
+
+impl<'a, T> FmtSlice<'a, T> {
+    pub fn new(data: &'a [T], separator: &'a str) -> Self {
+        Self { separator, data }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for FmtSlice<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.data.iter();
+        if let Some(first) = iter.next() {
+            write!(f, "{first:?}")?;
+        }
+        for elem in iter {
+            write!(f, "{}{:?}", self.separator, elem)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for FmtSlice<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.data.iter();
+        if let Some(first) = iter.next() {
+            write!(f, "{first}")?;
+        }
+        for elem in iter {
+            write!(f, "{}{}", self.separator, elem)?;
+        }
+        Ok(())
     }
 }
 

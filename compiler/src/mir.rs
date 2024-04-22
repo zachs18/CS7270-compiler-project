@@ -17,7 +17,7 @@ use crate::{
     ast::BinaryOp,
     hir::{self, BlockLabel, HirCtx, Mutability, PointerSized, Symbol},
     token::Ident,
-    util::Scope,
+    util::{FmtSlice, Scope},
 };
 
 use self::optimizations::MirOptimization;
@@ -1060,7 +1060,7 @@ fn lower_normal_binary_op_expression(
 ///
 /// Returns the initial BasicBlockIdx.
 fn lower_expression(
-    expr: &hir::Expression, ctx: &HirCtx, dst: SlotIdx, body: &mut Body,
+    expr: &hir::Expression, ctx: &HirCtx, dst_slot: SlotIdx, body: &mut Body,
     value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
@@ -1071,7 +1071,7 @@ fn lower_expression(
         hir::ExpressionKind::Ident(name) => {
             let ops = match value_scope.lookup(name) {
                 Some(&(_, local)) => vec![BasicOperation::Assign(
-                    Place::from(dst),
+                    Place::from(dst_slot),
                     Value::Operand(Operand::Copy(Place::from(local))),
                 )],
                 None => match compilation_unit.globals.get(name) {
@@ -1104,7 +1104,7 @@ fn lower_expression(
                                         )),
                                     ),
                                     BasicOperation::Assign(
-                                        Place::from(dst),
+                                        Place::from(dst_slot),
                                         Value::Operand(Operand::Copy(Place {
                                             local: addr_slot,
                                             projections: vec![
@@ -1124,7 +1124,7 @@ fn lower_expression(
                                 ItemKindStub::Fn | ItemKindStub::StringLiteral,
                             ) => {
                                 vec![BasicOperation::Assign(
-                                    Place::from(dst),
+                                    Place::from(dst_slot),
                                     Value::Operand(Operand::Constant(
                                         Constant::ItemAddress(*name),
                                     )),
@@ -1143,7 +1143,7 @@ fn lower_expression(
         }
         hir::ExpressionKind::Integer(value) => {
             let op = BasicOperation::Assign(
-                Place::from(dst),
+                Place::from(dst_slot),
                 Value::Operand(Operand::Constant(Constant::Integer(
                     value.value,
                 ))),
@@ -1156,7 +1156,7 @@ fn lower_expression(
         }
         &hir::ExpressionKind::Bool(value) => {
             let op = BasicOperation::Assign(
-                Place::from(dst),
+                Place::from(dst_slot),
                 Value::Operand(Operand::Constant(Constant::Bool(value))),
             );
             let block = BasicBlock {
@@ -1170,7 +1170,7 @@ fn lower_expression(
             let (anon_global, _) = compilation_unit
                 .make_anonymous_static_for_string_literal(literal.data);
             let op = BasicOperation::Assign(
-                Place::from(dst),
+                Place::from(dst_slot),
                 Value::Operand(Operand::Constant(Constant::ItemAddress(
                     anon_global,
                 ))),
@@ -1207,7 +1207,7 @@ fn lower_expression(
                 deref_block.update(
                     body,
                     vec![BasicOperation::Assign(
-                        Place::from(dst),
+                        Place::from(dst_slot),
                         Value::Operand(Operand::Copy(Place {
                             local: operand_slot,
                             projections: vec![PlaceProjection::Deref],
@@ -1235,7 +1235,7 @@ fn lower_expression(
                         rhs,
                         *op,
                         ctx,
-                        dst,
+                        dst_slot,
                         body,
                         value_scope,
                         label_scope,
@@ -1250,7 +1250,7 @@ fn lower_expression(
                     rhs,
                     *op,
                     ctx,
-                    dst,
+                    dst_slot,
                     body,
                     value_scope,
                     label_scope,
@@ -1291,7 +1291,7 @@ fn lower_expression(
             let then_block_idx = lower_block(
                 then_block,
                 ctx,
-                dst,
+                dst_slot,
                 body,
                 value_scope,
                 label_scope,
@@ -1304,14 +1304,14 @@ fn lower_expression(
                 Some(else_block) => lower_block(
                     else_block,
                     ctx,
-                    dst,
+                    dst_slot,
                     body,
                     value_scope,
                     label_scope,
                     next_block,
                     compilation_unit,
                 ),
-                None => body.insert_assign_unit_block(dst, next_block),
+                None => body.insert_assign_unit_block(dst_slot, next_block),
             };
             switch_block_idx.update(
                 body,
@@ -1332,7 +1332,7 @@ fn lower_expression(
                 label,
                 LabelDestination {
                     break_dst: next_block,
-                    break_value_slot: dst,
+                    break_value_slot: dst_slot,
                     continue_dst: Some(initial_block.as_basic_block_idx()),
                 },
             );
@@ -1362,7 +1362,7 @@ fn lower_expression(
                     label,
                     LabelDestination {
                         break_dst: next_block,
-                        break_value_slot: dst,
+                        break_value_slot: dst_slot,
                         continue_dst: None,
                     },
                 );
@@ -1370,7 +1370,7 @@ fn lower_expression(
             lower_block(
                 block,
                 ctx,
-                dst,
+                dst_slot,
                 body,
                 value_scope,
                 &mut label_scope,
@@ -1383,13 +1383,76 @@ fn lower_expression(
         }
         hir::ExpressionKind::Wildcard => panic!(
             "wildcard expressions should only happen in the lhs of assignment \
-             ops, which should not use lower_expression"
+             ops (i.e. place-expressions), which should not use \
+             lower_expression"
         ),
         hir::ExpressionKind::Index { base, index } => {
             todo!("lower indexing to MIR")
         }
         hir::ExpressionKind::Call { function, args } => {
-            todo!("lower calls to MIR")
+            // Create slots for the function and each argument, then evaluate
+            // the function, then evaluate the arguments, then call the
+            // function.
+
+            let func_slot =
+                body.new_slot(compilation_unit.lower_type(function.type_, ctx));
+            let arg_slots = args
+                .iter()
+                .map(|expr| {
+                    body.new_slot(compilation_unit.lower_type(expr.type_, ctx))
+                })
+                .collect_vec();
+
+            let mut intermediate_block = body.temp_block();
+            let initial_block = lower_expression(
+                function,
+                ctx,
+                func_slot,
+                body,
+                value_scope,
+                label_scope,
+                intermediate_block.as_basic_block_idx(),
+                compilation_unit,
+            );
+
+            for (expr, &arg_slot) in std::iter::zip(args, &arg_slots) {
+                let next_intermediate_block = body.temp_block();
+                let expr_initial_block = lower_expression(
+                    expr,
+                    ctx,
+                    arg_slot,
+                    body,
+                    value_scope,
+                    label_scope,
+                    next_intermediate_block.as_basic_block_idx(),
+                    compilation_unit,
+                );
+                intermediate_block.update(
+                    body,
+                    vec![],
+                    Terminator::Goto { target: expr_initial_block },
+                );
+                intermediate_block = next_intermediate_block;
+            }
+
+            // This is now the last block
+            intermediate_block.update(
+                body,
+                vec![],
+                Terminator::Call {
+                    func: Value::Operand(Operand::Copy(Place::from(func_slot))),
+                    args: arg_slots
+                        .into_iter()
+                        .map(|arg_slot| {
+                            Value::Operand(Operand::Copy(Place::from(arg_slot)))
+                        })
+                        .collect_vec(),
+                    return_destination: Place::from(dst_slot),
+                    target: next_block,
+                },
+            );
+
+            initial_block
         }
         hir::ExpressionKind::Break { label, value } => {
             todo!("lower break to MIR")
@@ -1503,8 +1566,11 @@ impl fmt::Display for Terminator {
             Self::Call { func, args, return_destination, target } => {
                 write!(
                     f,
-                    "{} = {}(todo: args) -> bb{}",
-                    return_destination, func, target.0
+                    "{} = {}({}) -> bb{}",
+                    return_destination,
+                    func,
+                    FmtSlice::new(args, ", "),
+                    target.0
                 )
             }
         }
@@ -1595,10 +1661,15 @@ impl fmt::Display for Value {
         match self {
             Value::Operand(operand) => write!(f, "{operand}"),
             Value::BinaryOp(op, lhs, rhs) => match op {
-                BinaryOp::Assignment => unreachable!(),
+                BinaryOp::Assignment => unreachable!(
+                    "assignment ops should not be lowered to BinaryOp values"
+                ),
                 BinaryOp::Arithmetic(op) => write!(f, "{op:?}({lhs}, {rhs})"),
                 BinaryOp::Comparison(op) => write!(f, "{op:?}({lhs}, {rhs})"),
-                BinaryOp::RangeOp { .. } => todo!(),
+                BinaryOp::RangeOp { .. } => unreachable!(
+                    "range ops are only allowed as part of for-loop syntax \
+                     sugar and should not exist in MIR"
+                ),
             },
             Value::Not(_) => todo!(),
             Value::Negate(_) => todo!(),
@@ -1620,16 +1691,7 @@ impl fmt::Display for Constant {
             Constant::Integer(i) => write!(f, "const {i}"),
             Constant::Bool(b) => write!(f, "const {b}"),
             Constant::Tuple(elems) => {
-                let mut elems = elems.iter();
-                if let Some(first) = elems.next() {
-                    write!(f, "const ({first}")?;
-                    for elem in elems {
-                        write!(f, ", {elem}")?;
-                    }
-                    write!(f, ")")
-                } else {
-                    write!(f, "()")
-                }
+                write!(f, "const ({})", FmtSlice::new(elems, ", "))
             }
             Constant::ItemAddress(item) => {
                 // TODO: print the name?
