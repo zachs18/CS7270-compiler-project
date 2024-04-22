@@ -955,11 +955,11 @@ fn lower_pattern(
         &hir::Pattern::Ident { mutability, ident } => {
             // Create a new slot for the new variable, and insert an assignment
             // operation
+            let new_slot = body.new_slot(src_ty);
             assert!(
-                value_scope.insert(ident, (mutability, src)).is_none(),
+                value_scope.insert(ident, (mutability, new_slot)).is_none(),
                 "duplicate local {ident}"
             );
-            let new_slot = body.new_slot(src_ty);
             let op = BasicOperation::Assign(
                 Place::from(new_slot),
                 Value::Operand(Operand::Copy(Place::from(src))),
