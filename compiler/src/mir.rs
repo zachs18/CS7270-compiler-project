@@ -1580,17 +1580,21 @@ impl fmt::Display for Terminator {
 #[derive(Debug)]
 enum BasicOperation {
     Assign(Place, Value),
+    Nop,
 }
 
 impl fmt::Display for BasicOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Assign(place, value) => write!(f, "{place} = {value};"),
+            BasicOperation::Assign(place, value) => {
+                write!(f, "{place} = {value};")
+            }
+            BasicOperation::Nop => write!(f, "Nop;"),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Place {
     local: SlotIdx,
     projections: Vec<PlaceProjection>,
@@ -1621,7 +1625,7 @@ impl From<SlotIdx> for Place {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PlaceProjection {
     /// Used for arrays and tuples (pointer indexing is lowered to addition and
     /// deref)
@@ -1632,7 +1636,7 @@ enum PlaceProjection {
     Deref,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Operand {
     Copy(Place),
     Constant(Constant),
@@ -1647,7 +1651,7 @@ impl fmt::Display for Operand {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Value {
     Operand(Operand),
     /// Must be Arithmetic or Comparison.
@@ -1677,7 +1681,7 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Constant {
     Integer(u128),
     Bool(bool),

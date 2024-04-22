@@ -2,20 +2,18 @@
 //!
 //! * Combining blocks
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use itertools::Itertools;
-use petgraph::{
-    graph::DiGraph,
-    graphmap::{DiGraphMap, GraphMap},
-    Graph,
-};
+use petgraph::graphmap::{DiGraphMap, GraphMap};
 
-use crate::mir::{self, BasicBlock, BasicBlockIdx, Terminator};
+use super::{
+    BasicBlockIdx, BasicOperation, Body, Operand, SlotIdx, Terminator, Value,
+};
 
 pub trait MirOptimization {
     /// Returns `true` if any changes occurred.
-    fn apply(&self, body: &mut mir::Body) -> bool;
+    fn apply(&self, body: &mut Body) -> bool;
 }
 
 /// MIR optimization that considers the control-flow graph of a `Body`, and
@@ -56,7 +54,7 @@ pub trait MirOptimization {
 pub struct CombineBlocks;
 
 impl MirOptimization for CombineBlocks {
-    fn apply(&self, body: &mut mir::Body) -> bool {
+    fn apply(&self, body: &mut Body) -> bool {
         enum BranchKind {
             Goto,
             /// A conditional branch, e.g. `SwitchBool`
@@ -77,16 +75,14 @@ impl MirOptimization for CombineBlocks {
              src,
              terminator: &Terminator| {
                 match *terminator {
-                    mir::Terminator::Goto { target } => {
+                    Terminator::Goto { target } => {
                         control_flow_graph.add_edge(
                             src,
                             target,
                             BranchKind::Goto,
                         );
                     }
-                    mir::Terminator::SwitchBool {
-                        true_dst, false_dst, ..
-                    } => {
+                    Terminator::SwitchBool { true_dst, false_dst, .. } => {
                         control_flow_graph.add_edge(
                             src,
                             true_dst,
@@ -98,7 +94,7 @@ impl MirOptimization for CombineBlocks {
                             BranchKind::Conditional,
                         );
                     }
-                    mir::Terminator::SwitchCmp {
+                    Terminator::SwitchCmp {
                         less_dst,
                         equal_dst,
                         greater_dst,
@@ -120,17 +116,17 @@ impl MirOptimization for CombineBlocks {
                             BranchKind::Conditional,
                         );
                     }
-                    mir::Terminator::Call { target, .. } => {
+                    Terminator::Call { target, .. } => {
                         control_flow_graph.add_edge(
                             src,
                             target,
                             BranchKind::Call,
                         );
                     }
-                    mir::Terminator::Return | mir::Terminator::Unreachable => {
+                    Terminator::Return | Terminator::Unreachable => {
                         // no edge to add
                     }
-                    mir::Terminator::Error => {
+                    Terminator::Error => {
                         unreachable!(
                             "Terminator::Error encountered after MIR-building"
                         )
@@ -228,7 +224,7 @@ impl MirOptimization for CombineBlocks {
 pub struct TrimUnreachable;
 
 impl MirOptimization for TrimUnreachable {
-    fn apply(&self, body: &mut mir::Body) -> bool {
+    fn apply(&self, body: &mut Body) -> bool {
         let mut reachable = vec![false; body.basic_blocks.len()];
         reachable[0] = true;
         let mut frontier: VecDeque<BasicBlockIdx> =
@@ -331,5 +327,254 @@ impl MirOptimization for TrimUnreachable {
         }
 
         true
+    }
+}
+
+/// Find slots which are only used in one body, are assigned from a Copy from
+/// another slot, and are only used to be Copy'd from, and try to inline them
+/// into their usage.
+///
+/// This is not always possible, e.g. if the slot they were copied from is
+/// changed between the init and usage.
+///
+/// Note that this does *not* remove the original write to the slot. If it is
+/// truly unused, it will be removed later by [`DeadStoreElimination`].
+///
+/// TODO: expand this to handle the control-flow graph for inter-block
+/// optimization, or maybe make a separate opt that does that.
+///
+/// Examples:
+/// ```text
+/// // Before
+/// bb0 {
+///     _3 = Copy(_2);
+///     *_4 = Copy(_3);
+///     _2 = Copy(_5);
+///     *_6 = Copy(_3);
+///     goto -> bb1;
+/// }
+/// // After
+/// bb0 {
+///     _3 = Copy(_2);
+///     *_4 = Copy(_2);
+///     _2 = Copy(_5);
+///     *_6 = Copy(_3); // Note that this was not changed
+///     goto -> bb1;
+/// }
+/// ```
+/// ```text
+/// // Before
+/// bb0 {
+///     _3 = Copy(_2);
+///     *_4 = Copy(_3);
+///     _5 = call(Copy(_3)) -> bb1;
+/// }
+/// // After
+/// bb0 {
+///     _3 = Copy(_2);
+///     *_4 = Copy(_2);
+///     _5 = call(Copy(_2)) -> bb1;
+/// }
+/// ```
+pub struct RedundantCopyEliminiation;
+
+fn replace_in_value(
+    value: &mut Value, slot: SlotIdx, new_operand: &Operand,
+) -> bool {
+    match value {
+        Value::Operand(operand) => {
+            replace_in_operand(operand, slot, new_operand)
+        }
+        Value::BinaryOp(_, lhs, rhs) => {
+            let mut changed = false;
+            changed |= replace_in_operand(lhs, slot, new_operand);
+            changed |= replace_in_operand(rhs, slot, new_operand);
+            changed
+        }
+        Value::Not(value) => replace_in_value(value, slot, new_operand),
+        Value::Negate(value) => replace_in_value(value, slot, new_operand),
+    }
+}
+
+fn replace_in_operand(
+    operand: &mut Operand, slot: SlotIdx, new_operand: &Operand,
+) -> bool {
+    match operand {
+        Operand::Copy(place)
+            if place.local == slot && place.projections.is_empty() =>
+        {
+            *operand = new_operand.clone();
+            true
+        }
+        Operand::Copy(..) => false,
+        Operand::Constant(..) => false,
+    }
+}
+
+/// Replace `Copy(slot)` with `new_operand` anywhere it occurs. If this op is a
+/// write to `src_local`, return a conflict.
+///
+/// Returns whether a change was made, and whether a conflict was made.
+fn replace_in_operation(
+    op: &mut BasicOperation, slot: SlotIdx, new_operand: &Operand,
+    src_local: Option<SlotIdx>,
+) -> (bool, bool) {
+    match op {
+        BasicOperation::Nop => (false, false),
+        BasicOperation::Assign(place, value) => {
+            // NOTE: This is conservative; If `place.projections` contains a
+            // `Deref`, then this assignment doesn't actually conflict.
+            let conflict =
+                src_local.is_some_and(|src_local| src_local == place.local);
+            let mut changed = false;
+
+            // TODO: do the opt in place projections
+            #[cfg(any())]
+            for projection in &mut place.projections {}
+
+            changed |= replace_in_value(value, slot, new_operand);
+
+            (changed, conflict)
+        }
+    }
+}
+
+impl MirOptimization for RedundantCopyEliminiation {
+    fn apply(&self, body: &mut Body) -> bool {
+        // TODO: expand this to look between basic blocks. For now it only works
+        // in one basic block, which is probably good enough.
+
+        let mut changed = false;
+
+        for block in &mut body.basic_blocks {
+            // For each operation, see if it is assigning a duplicable value to
+            // a local slot. If so, replace that local in any
+            // operations later in the block with the duplicable value, until it
+            // becomes non-duplicable (e.g. because it is a Copy of a slot that
+            // got written to).
+            'this_block: for idx in 0..block.operations.len() {
+                let BasicOperation::Assign(place, Value::Operand(operand)) =
+                    &block.operations[idx]
+                else {
+                    continue;
+                };
+                if !place.projections.is_empty() {
+                    // We only consider writes to locals directly.
+                    // TODO: maybe consider writes to local array/tuple elements
+                    // via index projections.
+                    continue;
+                }
+                let slot = place.local;
+                // Find the local being copied from in the assignment, so we can
+                // stop if it changes, since that would make the optimization
+                // incorrect.
+                let src_local = match operand {
+                    Operand::Copy(place) if !place.projections.is_empty() => {
+                        // Conservatively don't deduplicate copies from more
+                        // complicated places.
+                        continue 'this_block;
+                    }
+                    Operand::Copy(place) => Some(place.local),
+                    Operand::Constant(_) => None,
+                };
+
+                // Replace `Copy(slot)` with `new_operand` wherever it occurs in
+                // the rest of the block.
+                let new_operand = operand.clone();
+                for op in &mut block.operations[idx + 1..] {
+                    let (c, encountered_conflict) =
+                        replace_in_operation(op, slot, &new_operand, src_local);
+                    changed |= c;
+                    if encountered_conflict {
+                        continue 'this_block;
+                    }
+                }
+
+                // Replace `Copy(slot)` with `new_operand` wherever it occurs in
+                // the terminator.
+                match &mut block.terminator {
+                    Terminator::Call { func, args, .. } => {
+                        changed |= replace_in_value(func, slot, &new_operand);
+                        for arg in args {
+                            changed |=
+                                replace_in_value(arg, slot, &new_operand);
+                        }
+                        // TODO: apply opt in place projections
+                        #[cfg(any())]
+                        {
+                            changed |= replace_in_place_projections(
+                                return_destination,
+                                slot,
+                                &new_operand,
+                            );
+                        }
+                    }
+                    Terminator::Goto { .. }
+                    | Terminator::SwitchBool { .. }
+                    | Terminator::SwitchCmp { .. }
+                    | Terminator::Return
+                    | Terminator::Unreachable => {}
+                    Terminator::Error => unreachable!(),
+                }
+            }
+        }
+
+        changed
+    }
+}
+
+/// TODO: "dominate" is not the correct terminology here. I mean "this thing
+/// *can* lead to the other thing", but "dominates" means "*every* path from the
+/// start to the other thing goes through this thing". I can't think of the
+/// correct terminology right now though, so 🤷.
+///
+/// Find assignments to locals which do not dominate in the control-flow-graph
+/// any usages of that local before another write to that local, and
+/// eliminate them.
+///
+/// Note that writes to `_0` which reach `return` are not dead, since `_0` is
+/// the return slot.
+///
+/// Examples:
+/// ```text
+/// // Before
+/// bb0 {
+///     _0 = const 37; // Removed because it dominates _0 = const 21 below.
+///     _3 = const 42; // Removed because _3 is not used after this
+///     _0 = const 21;
+///     return
+/// }
+/// // After
+/// bb0 {
+///     _0 = const 21; // Not removed because _0 is the return slot.
+///     return
+/// }
+/// ```
+/// ```text
+/// // Before
+/// bb0 {
+///     _1 = const 37;
+///     _2 = const 42;
+///     goto -> bb1
+/// }
+/// bb1 {
+///     _0 = Copy(_2);
+///     return
+/// }
+/// // After
+/// bb0 {
+///     _2 = const 42;
+///     goto -> bb1
+/// }
+/// bb1 {
+///     _0 = Copy(_2);
+///     return
+/// }
+/// ```
+pub struct DeadWriteElimination;
+
+impl MirOptimization for DeadWriteElimination {
+    fn apply(&self, body: &mut Body) -> bool {
+        todo!()
     }
 }

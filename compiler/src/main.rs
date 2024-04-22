@@ -23,7 +23,8 @@ fn usage() -> ExitCode {
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+        env_logger::Env::default()
+            .filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     )
     .format(|buf, record| {
         use std::io::Write;
@@ -88,7 +89,14 @@ fn main() -> ExitCode {
 
     mir.apply_optimization(mir::optimizations::TrimUnreachable);
 
-    println!("post-CombineBlocks: ");
+    println!("post-TrimUnreachable: ");
+    println!("{mir}");
+
+    println!();
+
+    mir.apply_optimization(mir::optimizations::RedundantCopyEliminiation);
+
+    println!("post-RedundantCopyEliminiation: ");
     println!("{mir}");
 
     println!();
