@@ -1604,15 +1604,27 @@ impl fmt::Display for Place {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use std::fmt::Write;
         let mut place = format!("_{}", self.local.0);
+        let mut postfix_needs_parens = false;
         for projection in &self.projections {
-            match projection {
-                PlaceProjection::ConstantIndex(idx) => {
-                    write!(place, ".{idx}").unwrap()
+            match (projection, postfix_needs_parens) {
+                (PlaceProjection::ConstantIndex(idx), false) => {
+                    write!(place, ".{idx}")?;
                 }
-                PlaceProjection::Index(idx) => {
-                    write!(place, "[_{}]", idx.0).unwrap()
+                (PlaceProjection::ConstantIndex(idx), true) => {
+                    place = format!("({place}).{idx}");
+                    postfix_needs_parens = false;
                 }
-                PlaceProjection::Deref => place = format!("*({place})"),
+                (PlaceProjection::Index(idx), false) => {
+                    write!(place, "[_{}]", idx.0)?;
+                }
+                (PlaceProjection::Index(idx), true) => {
+                    place = format!("({place})[_{}]", idx.0);
+                    postfix_needs_parens = false;
+                }
+                (PlaceProjection::Deref, _) => {
+                    place = format!("(*{place})");
+                    postfix_needs_parens = true;
+                }
             }
         }
         f.write_str(place.as_str())
