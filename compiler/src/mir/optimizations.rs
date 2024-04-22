@@ -8,7 +8,8 @@ use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
 use super::{
-    BasicBlockIdx, BasicOperation, Body, Operand, SlotIdx, Terminator, Value,
+    BasicBlockIdx, BasicOperation, Body, Operand, Place, PlaceProjection,
+    SlotIdx, Terminator, Value,
 };
 
 pub trait MirOptimization {
@@ -221,9 +222,9 @@ impl MirOptimization for CombineBlocks {
 ///     return
 /// }
 /// ```
-pub struct TrimUnreachable;
+pub struct TrimUnreachableBlocks;
 
-impl MirOptimization for TrimUnreachable {
+impl MirOptimization for TrimUnreachableBlocks {
     fn apply(&self, body: &mut Body) -> bool {
         let mut reachable = vec![false; body.basic_blocks.len()];
         reachable[0] = true;
@@ -571,10 +572,128 @@ impl MirOptimization for RedundantCopyEliminiation {
 ///     return
 /// }
 /// ```
-pub struct DeadWriteElimination;
+pub struct DeadLocalWriteElimination;
 
-impl MirOptimization for DeadWriteElimination {
+fn find_reads_in_value_read(slots: &mut [bool], value: &Value) {
+    match value {
+        Value::Operand(operand) => {
+            find_reads_in_operand_read(slots, operand);
+        }
+        Value::BinaryOp(_, lhs, rhs) => {
+            find_reads_in_operand_read(slots, lhs);
+            find_reads_in_operand_read(slots, rhs);
+        }
+        Value::Not(value) => find_reads_in_value_read(slots, value),
+        Value::Negate(value) => find_reads_in_value_read(slots, value),
+    }
+}
+
+/// For each slot that is read when this `Operand` is evaluated in a
+/// `Value::Operand`, set the corresponding element of `slots` to `true`.
+fn find_reads_in_operand_read(slots: &mut [bool], operand: &Operand) {
+    match operand {
+        Operand::Copy(place) => {
+            slots[place.local.0] = true;
+            for projection in &place.projections {
+                match projection {
+                    PlaceProjection::ConstantIndex(..)
+                    | PlaceProjection::Deref => {}
+                    PlaceProjection::Index(idx) => slots[idx.0] = true,
+                }
+            }
+        }
+        Operand::Constant(..) => {}
+    }
+}
+
+/// For each slot that is read when this `Place` is evaluated in a
+/// `Value::Operand(Operand::Place(..))`, set the corresponding element of
+/// `slots` to `true`.
+fn find_reads_in_place_read(slots: &mut [bool], place: &Place) {
+    slots[place.local.0] = true;
+    for projection in &place.projections {
+        match projection {
+            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
+            PlaceProjection::Index(idx) => slots[idx.0] = true,
+        }
+    }
+}
+
+/// For each slot that is read when this `Place` is evaluated as the assignee,
+/// set the corresponding element of `slots` to `true`.
+fn find_reads_in_place_write(slots: &mut [bool], place: &Place) {
+    for projection in &place.projections {
+        match projection {
+            PlaceProjection::ConstantIndex(..) => {}
+            PlaceProjection::Deref => {
+                // If this is a deref place, then it's not actually
+                // writing to the place's local, it's *reading* it.
+                slots[place.local.0] = true;
+            }
+            PlaceProjection::Index(idx) => slots[idx.0] = true,
+        }
+    }
+}
+
+impl MirOptimization for DeadLocalWriteElimination {
     fn apply(&self, body: &mut Body) -> bool {
-        todo!()
+        // TODO: Currently this conservatively only removes writes to locals
+        // which are *never* used (not just that aren't used before the local is
+        // written to again), because that is easier to implement.
+
+        // Find all locals which are *ever* read from.
+        let mut slots = vec![false; body.slots.len()];
+
+        for block in &body.basic_blocks {
+            for op in &block.operations {
+                match op {
+                    BasicOperation::Nop => {}
+                    BasicOperation::Assign(place, value) => {
+                        find_reads_in_place_write(&mut slots, place);
+                        find_reads_in_value_read(&mut slots, value);
+                    }
+                }
+            }
+            match &block.terminator {
+                Terminator::SwitchBool { scrutinee, .. } => {
+                    slots[scrutinee.0] = true;
+                }
+                Terminator::SwitchCmp { lhs, rhs, .. } => {
+                    slots[lhs.0] = true;
+                    slots[rhs.0] = true;
+                }
+                Terminator::Return => {
+                    // If we reach a return, then `_0` is read.
+                    slots[0] = true;
+                }
+                Terminator::Goto { .. } | Terminator::Unreachable => {}
+                Terminator::Call { func, args, return_destination, .. } => {
+                    find_reads_in_value_read(&mut slots, func);
+                    for arg in args {
+                        find_reads_in_value_read(&mut slots, arg);
+                    }
+                    find_reads_in_place_write(&mut slots, return_destination);
+                }
+                Terminator::Error => unreachable!(),
+            }
+        }
+
+        // Now, go through and remove all writes to slots which are never read.
+        // Note: we don't remove `Call`s which write to these slots, since they
+        // can have side effects.
+        let mut any_removed = false;
+        for block in &mut body.basic_blocks {
+            block.operations.retain(|op| match op {
+                BasicOperation::Nop => true,
+                BasicOperation::Assign(place, _) => {
+                    let should_remove =
+                        place.projections.is_empty() && !slots[place.local.0];
+                    any_removed |= should_remove;
+                    !should_remove
+                }
+            });
+        }
+
+        any_removed
     }
 }

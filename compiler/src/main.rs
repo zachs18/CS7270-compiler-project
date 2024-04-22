@@ -75,31 +75,26 @@ fn main() -> ExitCode {
 
     let mut mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
 
+    macro_rules! apply_optimization {
+        ($opt_name:ident) => {
+            mir.apply_optimization(mir::optimizations::$opt_name);
+
+            println!("post-{}:", stringify!($opt_name));
+            println!("{mir}");
+
+            println!();
+        };
+    }
+
     println!("pre-opt: ");
     println!("{mir}");
 
     println!();
 
-    mir.apply_optimization(mir::optimizations::CombineBlocks);
-
-    println!("post-CombineBlocks: ");
-    println!("{mir}");
-
-    println!();
-
-    mir.apply_optimization(mir::optimizations::TrimUnreachable);
-
-    println!("post-TrimUnreachable: ");
-    println!("{mir}");
-
-    println!();
-
-    mir.apply_optimization(mir::optimizations::RedundantCopyEliminiation);
-
-    println!("post-RedundantCopyEliminiation: ");
-    println!("{mir}");
-
-    println!();
+    apply_optimization!(CombineBlocks);
+    apply_optimization!(TrimUnreachableBlocks);
+    apply_optimization!(RedundantCopyEliminiation);
+    apply_optimization!(DeadLocalWriteElimination);
 
     ExitCode::SUCCESS
 }
