@@ -1,0 +1,3 @@
+extern fn hello(x: u32) -> u32;
+
+extern fn world(x: u32) -> u32 { hello(x) }
