@@ -555,9 +555,9 @@ impl CompilationUnit {
             .iter_mut()
             .filter_map(|item| item.as_mut().left())
             .map(|item| match item {
-                ItemKind::DeclaredExternStatic { .. } => false,
-                ItemKind::StringLiteral { .. } => false,
-                ItemKind::DeclaredExternFn { .. } => false,
+                ItemKind::DeclaredExternStatic { .. }
+                | ItemKind::StringLiteral { .. }
+                | ItemKind::DeclaredExternFn { .. } => false,
                 ItemKind::DefinedExternStatic { initializer, .. }
                 | ItemKind::LocalStatic { initializer, .. } => {
                     opt.apply(initializer)
@@ -602,11 +602,12 @@ enum ItemKind {
 
 /// Only used while lowering, so that items being lowered can know how to access
 /// another item.
+///
+/// There are never stubbed string literals.
 #[derive(Debug)]
 enum ItemKindStub {
     Static,
     Fn,
-    StringLiteral,
 }
 
 #[derive(Debug)]
@@ -1109,9 +1110,7 @@ fn lower_expression(
                                 | ItemKind::LocalFn { .. }
                                 | ItemKind::StringLiteral { .. },
                             )
-                            | Either::Right(
-                                ItemKindStub::Fn | ItemKindStub::StringLiteral,
-                            ) => {
+                            | Either::Right(ItemKindStub::Fn) => {
                                 vec![BasicOperation::Assign(
                                     Place::from(dst_slot),
                                     Value::Operand(Operand::Constant(
