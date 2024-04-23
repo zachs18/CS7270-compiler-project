@@ -2,6 +2,9 @@
 //! and lowering to assembly.
 //!
 //! Roughly similar to https://doc.rust-lang.org/stable/nightly-rustc/rustc_middle/mir/index.html
+//!
+//! Note: Assignments to slots of type `()` may be ignored (since they do
+//! nothing).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -753,19 +756,6 @@ impl Body {
         BasicBlockIdx(idx)
     }
 
-    fn insert_assign_unit_block(
-        &mut self, dst: SlotIdx, next_block: BasicBlockIdx,
-    ) -> BasicBlockIdx {
-        let op = BasicOperation::Assign(
-            Place::from(dst),
-            Value::Operand(Operand::Constant(Constant::Tuple(Arc::new([])))),
-        );
-        self.insert_block(BasicBlock {
-            operations: vec![op],
-            terminator: Terminator::Goto { target: next_block },
-        })
-    }
-
     /// Used to create a temporary basic block that will be updated later, when
     /// you need to have a destination for something before the destination is
     /// made.
@@ -831,14 +821,15 @@ fn lower_block(
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
     // 4 cases:
-    // * no statements, no tail: assign () to dst
-    // * no statements, with tail: assign tail to dst
-    // * statements, no tail: lower statements, assign () to dst
-    // * statements, with tail: lower statements, assign tail to dst
+    // * no statements, no tail: immediately jump to next_block
+    // * no statements, with tail: assign tail to dst, jump to next_block
+    // * statements, no tail: lower statements, jump to next_block
+    // * statements, with tail: lower statements, assign tail to dst, jump to
+    //   next_block
 
     match block {
         hir::Block { statements, tail: None } if statements.is_empty() => {
-            body.insert_assign_unit_block(dst, next_block)
+            next_block
         }
         hir::Block { statements, tail: Some(tail) }
             if statements.is_empty() =>
@@ -881,12 +872,7 @@ fn lower_block(
 
             prev_intermediate_block.update(
                 body,
-                vec![BasicOperation::Assign(
-                    Place::from(dst),
-                    Value::Operand(Operand::Constant(Constant::Tuple(
-                        Arc::new([]),
-                    ))),
-                )],
+                vec![],
                 Terminator::Goto { target: next_block },
             );
             initial_block
@@ -1058,7 +1044,7 @@ fn lower_normal_binary_op_expression(
     bb0
 }
 
-/// Lowers an expression into BasicBlocks which evaluate the expression,
+/// Lowers a value-expression into BasicBlocks which evaluate the expression,
 /// write the result to `dst`, and then jump to `next_block`.
 ///
 /// Returns the initial BasicBlockIdx.
@@ -1224,6 +1210,12 @@ fn lower_expression(
         },
         hir::ExpressionKind::BinaryOp { lhs, op, rhs } => match op {
             crate::ast::BinaryOp::Assignment => {
+                // Lower assignment as:
+                // 1. evalute rhs into a new slot
+                // 2. Depending on lhs: ident-expression if local: write to slot
+                //    ident-expression if static: new slot addr of static, write
+                //    to deref other: TODO
+
                 todo!(
                     "assignment expressions: need to lower lhs as a \
                      place-expression, etc"
@@ -1314,7 +1306,7 @@ fn lower_expression(
                     next_block,
                     compilation_unit,
                 ),
-                None => body.insert_assign_unit_block(dst_slot, next_block),
+                None => next_block,
             };
             dbg!(next_block);
             switch_block_idx.update(
@@ -1331,7 +1323,7 @@ fn lower_expression(
         hir::ExpressionKind::Loop { label, body: block } => {
             let initial_block = body.temp_block();
             let mut label_scope = Scope::new(Some(label_scope));
-            let (label) = label.expect("Loop should have label");
+            let label = label.expect("Loop should have label");
             label_scope.insert(
                 label,
                 LabelDestination {
@@ -1382,7 +1374,7 @@ fn lower_expression(
                 compilation_unit,
             )
         }
-        hir::ExpressionKind::Match { scrutinee, arms } => {
+        hir::ExpressionKind::Match { .. } => {
             unimplemented!("match expressions not implemented")
         }
         hir::ExpressionKind::Wildcard => panic!(
@@ -1475,16 +1467,7 @@ fn lower_expression(
                     return_block.update(body, vec![], Terminator::Return);
                     initial_block
                 }
-                None => return_block.update(
-                    body,
-                    vec![BasicOperation::Assign(
-                        Place::from(SlotIdx(0)),
-                        Value::Operand(Operand::Constant(Constant::Tuple(
-                            Arc::new([]),
-                        ))),
-                    )],
-                    Terminator::Return,
-                ),
+                None => return_block.update(body, vec![], Terminator::Return),
             }
         }
         hir::ExpressionKind::Break { label, value } => {
@@ -1509,12 +1492,7 @@ fn lower_expression(
                     compilation_unit,
                 ),
                 None => body.insert_block(BasicBlock {
-                    operations: vec![BasicOperation::Assign(
-                        Place::from(break_value_slot),
-                        Value::Operand(Operand::Constant(Constant::Tuple(
-                            Arc::new([]),
-                        ))),
-                    )],
+                    operations: vec![],
                     terminator: Terminator::Goto { target: break_dst },
                 }),
             }
