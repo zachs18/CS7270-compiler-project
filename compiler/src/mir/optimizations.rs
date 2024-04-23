@@ -224,49 +224,57 @@ impl MirOptimization for CombineBlocks {
 /// ```
 pub struct TrimUnreachableBlocks;
 
+fn find_reachable_blocks_from(
+    body: &Body, from: impl IntoIterator<Item = BasicBlockIdx>,
+) -> Vec<bool> {
+    let mut from = from.into_iter();
+    let mut reachable = vec![false; body.basic_blocks.len()];
+    let mut frontier: VecDeque<BasicBlockIdx> =
+        VecDeque::with_capacity(from.size_hint().0);
+
+    macro_rules! insert_frontier {
+        ($($block:expr),*) => {{
+            $(
+                let block = $block;
+                if !reachable[block.0] {
+                    reachable[block.0] = true;
+                    frontier.push_back(block);
+                }
+            )*
+        }};
+    }
+
+    for src in from {
+        insert_frontier!(src);
+    }
+
+    while let Some(idx) = frontier.pop_front() {
+        match body.basic_blocks[idx.0].terminator {
+            Terminator::Goto { target } => {
+                insert_frontier!(target);
+            }
+            Terminator::SwitchBool { true_dst, false_dst, .. } => {
+                insert_frontier!(true_dst, false_dst);
+            }
+            Terminator::SwitchCmp {
+                less_dst, equal_dst, greater_dst, ..
+            } => {
+                insert_frontier!(less_dst, equal_dst, greater_dst);
+            }
+            Terminator::Call { target, .. } => {
+                insert_frontier!(target);
+            }
+            Terminator::Return | Terminator::Unreachable => {}
+            Terminator::Error => unreachable!(),
+        }
+    }
+
+    reachable
+}
+
 impl MirOptimization for TrimUnreachableBlocks {
     fn apply(&self, body: &mut Body) -> bool {
-        let mut reachable = vec![false; body.basic_blocks.len()];
-        reachable[0] = true;
-        let mut frontier: VecDeque<BasicBlockIdx> =
-            VecDeque::from([BasicBlockIdx(0)]);
-
-        // Breadth-first floodfill to find all reachable blocks
-        macro_rules! insert_frontier {
-            ($($block:expr),*) => {{
-                $(
-                    let block = $block;
-                    if !reachable[block.0] {
-                        reachable[block.0] = true;
-                        frontier.push_back(block);
-                    }
-                )*
-            }};
-        }
-
-        while let Some(idx) = frontier.pop_front() {
-            match body.basic_blocks[idx.0].terminator {
-                Terminator::Goto { target } => insert_frontier!(target),
-                Terminator::SwitchBool { true_dst, false_dst, .. } => {
-                    insert_frontier!(true_dst, false_dst)
-                }
-                Terminator::SwitchCmp {
-                    less_dst,
-                    equal_dst,
-                    greater_dst,
-                    ..
-                } => {
-                    insert_frontier!(less_dst, equal_dst, greater_dst)
-                }
-                Terminator::Call { target, .. } => insert_frontier!(target),
-                Terminator::Return | Terminator::Unreachable => {
-                    // no other blocks to reach
-                }
-                Terminator::Error => {
-                    unreachable!("Terminator::Error after MIR-building")
-                }
-            }
-        }
+        let reachable = find_reachable_blocks_from(body, [BasicBlockIdx(0)]);
 
         // Now, we actually remove the now-unused blocks, then fixup all
         // terminators to point to the correct ones now.
