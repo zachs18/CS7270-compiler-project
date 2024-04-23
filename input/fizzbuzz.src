@@ -1,4 +1,4 @@
-extern fn printf(format: *const i8, ...);
+extern fn printf(format: *const i8, ...) -> i32;
 
 extern fn fizzbuzz(x: i32) {
     if x % 15 == 0 {
