@@ -122,12 +122,12 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     &mut compilation_unit,
                 );
                 let item = if extern_token.is_none() {
-                    ItemKind::LocalFn { body, todo: () }
+                    ItemKind::LocalFn { body }
                 } else {
                     let Symbol::Ident(name) = *name else {
                         panic!("extern fn must have non-synthetic name");
                     };
-                    ItemKind::DefinedExternFn { name, body, todo: () }
+                    ItemKind::DefinedExternFn { name, body }
                 };
                 compilation_unit.items[idx] = Either::Left(item);
             }
@@ -592,8 +592,8 @@ enum ItemKind {
     DefinedExternStatic { name: Ident, mutable: bool, initializer: Body },
     LocalStatic { mutable: bool, initializer: Body },
     DeclaredExternFn { name: Ident },
-    DefinedExternFn { name: Ident, body: Body, todo: () },
-    LocalFn { body: Body, todo: () },
+    DefinedExternFn { name: Ident, body: Body },
+    LocalFn { body: Body },
     StringLiteral { data: &'static [u8] },
 }
 
@@ -614,6 +614,7 @@ pub struct Body {
     ///
     /// For fn items, the arguments are in slots `1..=argc`.
     slots: Vec<TypeIdx>,
+    argc: usize,
     /// Basic blocks in this body. The initial block is index 0.
     basic_blocks: Vec<BasicBlock>,
 }
@@ -637,6 +638,7 @@ impl Body {
             BasicBlock { operations: vec![], terminator: Terminator::Return };
         let mut this = Body {
             slots: vec![return_type],
+            argc: 0,
             basic_blocks: vec![initial_block, terminal_block],
         };
 
@@ -669,7 +671,11 @@ impl Body {
     ) -> Self {
         let return_type = compilation_unit.lower_type(return_type, ctx);
 
-        let mut body = Body { slots: vec![return_type], basic_blocks: vec![] };
+        let mut body = Body {
+            slots: vec![return_type],
+            basic_blocks: vec![],
+            argc: args.len(),
+        };
 
         // The initial BasicBlock. This will be overwritten with a Goto
         // terminator for the fn body's initial block.
