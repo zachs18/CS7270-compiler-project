@@ -654,7 +654,7 @@ impl Body {
         let terminal_block = BasicBlockIdx(1);
 
         // SlotIdx(0) is always the return value
-        let body_initial_block = lower_expression(
+        let body_initial_block = lower_value_expression(
             initializer,
             ctx,
             SlotIdx(0),
@@ -835,7 +835,7 @@ fn lower_block(
         hir::Block { statements, tail: Some(tail) }
             if statements.is_empty() =>
         {
-            lower_expression(
+            lower_value_expression(
                 tail,
                 ctx,
                 dst,
@@ -902,7 +902,7 @@ fn lower_block(
                 );
                 prev_intermediate_block = next_intermediate_block;
             }
-            let expr_block = lower_expression(
+            let expr_block = lower_value_expression(
                 tail,
                 ctx,
                 dst,
@@ -1008,7 +1008,7 @@ fn lower_normal_binary_op_expression(
     let rhs_slot = body.new_slot(compilation_unit.lower_type(rhs.type_, ctx));
     let bb1 = body.temp_block();
     let bb3 = body.temp_block();
-    let bb0 = lower_expression(
+    let bb0 = lower_value_expression(
         lhs,
         ctx,
         lhs_slot,
@@ -1018,7 +1018,7 @@ fn lower_normal_binary_op_expression(
         bb1.as_basic_block_idx(),
         compilation_unit,
     );
-    let bb2 = lower_expression(
+    let bb2 = lower_value_expression(
         rhs,
         ctx,
         rhs_slot,
@@ -1049,7 +1049,7 @@ fn lower_normal_binary_op_expression(
 /// write the result to `dst`, and then jump to `next_block`.
 ///
 /// Returns the initial BasicBlockIdx.
-fn lower_expression(
+fn lower_value_expression(
     expr: &hir::Expression, ctx: &HirCtx, dst_slot: SlotIdx, body: &mut Body,
     value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
     label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
@@ -1181,7 +1181,7 @@ fn lower_expression(
                 let operand_slot = body
                     .new_slot(compilation_unit.lower_type(operand.type_, ctx));
                 let deref_block = body.temp_block();
-                let initial_block = lower_expression(
+                let initial_block = lower_value_expression(
                     operand,
                     ctx,
                     operand_slot,
@@ -1272,7 +1272,7 @@ fn lower_expression(
             // }
             let switch_block_idx = body.temp_block();
             let condition_slot = body.new_slot(compilation_unit.bool_type());
-            let evaluate_condition_block = lower_expression(
+            let evaluate_condition_block = lower_value_expression(
                 condition,
                 ctx,
                 condition_slot,
@@ -1399,7 +1399,7 @@ fn lower_expression(
                 .collect_vec();
 
             let mut intermediate_block = body.temp_block();
-            let initial_block = lower_expression(
+            let initial_block = lower_value_expression(
                 function,
                 ctx,
                 func_slot,
@@ -1412,7 +1412,7 @@ fn lower_expression(
 
             for (expr, &arg_slot) in std::iter::zip(args, &arg_slots) {
                 let next_intermediate_block = body.temp_block();
-                let expr_initial_block = lower_expression(
+                let expr_initial_block = lower_value_expression(
                     expr,
                     ctx,
                     arg_slot,
@@ -1453,7 +1453,7 @@ fn lower_expression(
             let return_block = body.temp_block();
             match value {
                 Some(expr) => {
-                    let initial_block = lower_expression(
+                    let initial_block = lower_value_expression(
                         expr,
                         ctx,
                         SlotIdx(0),
@@ -1480,7 +1480,7 @@ fn lower_expression(
             let break_value_slot = label_destination.break_value_slot;
             let break_dst = label_destination.break_dst;
             match value {
-                Some(expr) => lower_expression(
+                Some(expr) => lower_value_expression(
                     expr,
                     ctx,
                     break_value_slot,
@@ -1515,6 +1515,38 @@ fn lower_expression(
     }
 }
 
+/// Lowers an assignment-expression into BasicBlocks which evaluate the
+/// assignment and then jump to `next_block`.
+///
+/// Evaluates the *rhs* first (in contrast to "normal" binary operations)
+///
+/// Returns the initial BasicBlockIdx.
+fn lower_assignment_expression(
+    lhs: &hir::Expression, rhs: &hir::Expression, ctx: &HirCtx,
+    body: &mut Body,
+    value_scope: &mut Scope<'_, Symbol, (Mutability, SlotIdx)>,
+    label_scope: &mut Scope<'_, BlockLabel, LabelDestination>,
+    next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
+) -> BasicBlockIdx {
+    let intermediate_block = body.temp_block();
+    let intermediate_slot =
+        body.new_slot(compilation_unit.lower_type(rhs.type_, ctx));
+    let initial_block_idx = lower_value_expression(
+        rhs,
+        ctx,
+        intermediate_slot,
+        body,
+        value_scope,
+        label_scope,
+        intermediate_block.as_basic_block_idx(),
+        compilation_unit,
+    );
+
+    todo!("actually lower assignment");
+
+    initial_block_idx
+}
+
 /// Lowers a statement into BasicBlocks which evaluate the statement and then
 /// jump to `next_block`.
 ///
@@ -1533,7 +1565,7 @@ fn lower_statement(
             // that is implemented).
             let dst = body
                 .new_slot(compilation_unit.lower_type(expression.type_, ctx));
-            lower_expression(
+            lower_value_expression(
                 expression,
                 ctx,
                 dst,
