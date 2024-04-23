@@ -858,27 +858,28 @@ fn lower_block(
             // Put temp blocks between each statement, which are NOPs except
             // jumping to the next  statement. The last temp block is replaced
             // with the _dst = () block, and then jumps to `next_block`.
-            let mut temp_block = body.temp_block();
-            let initial_block = temp_block.as_basic_block_idx();
+            let mut prev_intermediate_block = body.temp_block();
+            let initial_block = prev_intermediate_block.as_basic_block_idx();
             for stmt in statements {
+                let next_intermediate_block = body.temp_block();
                 let dst = lower_statement(
                     stmt,
                     ctx,
                     body,
                     value_scope,
                     label_scope,
-                    next_block,
+                    next_intermediate_block.as_basic_block_idx(),
                     compilation_unit,
                 );
-                temp_block.update(
+                prev_intermediate_block.update(
                     body,
                     vec![],
                     Terminator::Goto { target: dst },
                 );
-                temp_block = body.temp_block();
+                prev_intermediate_block = next_intermediate_block;
             }
 
-            temp_block.update(
+            prev_intermediate_block.update(
                 body,
                 vec![BasicOperation::Assign(
                     Place::from(dst),
@@ -894,24 +895,25 @@ fn lower_block(
             // Put temp blocks between each statement, which are NOPs except
             // jumping to the next  statement. The last temp block jumps to the
             // expression evaluation, which then jumps to `next_block`.
-            let mut temp_block = body.temp_block();
-            let initial_block = temp_block.as_basic_block_idx();
+            let mut prev_intermediate_block = body.temp_block();
+            let initial_block = prev_intermediate_block.as_basic_block_idx();
             for stmt in statements {
+                let next_intermediate_block = body.temp_block();
                 let dst = lower_statement(
                     stmt,
                     ctx,
                     body,
                     value_scope,
                     label_scope,
-                    next_block,
+                    next_intermediate_block.as_basic_block_idx(),
                     compilation_unit,
                 );
-                temp_block.update(
+                prev_intermediate_block.update(
                     body,
                     vec![],
                     Terminator::Goto { target: dst },
                 );
-                temp_block = body.temp_block();
+                prev_intermediate_block = next_intermediate_block;
             }
             let expr_block = lower_expression(
                 tail,
@@ -924,14 +926,9 @@ fn lower_block(
                 compilation_unit,
             );
 
-            temp_block.update(
+            prev_intermediate_block.update(
                 body,
-                vec![BasicOperation::Assign(
-                    Place::from(dst),
-                    Value::Operand(Operand::Constant(Constant::Tuple(
-                        Arc::new([]),
-                    ))),
-                )],
+                vec![],
                 Terminator::Goto { target: expr_block },
             );
             initial_block
@@ -1319,6 +1316,7 @@ fn lower_expression(
                 ),
                 None => body.insert_assign_unit_block(dst_slot, next_block),
             };
+            dbg!(next_block);
             switch_block_idx.update(
                 body,
                 vec![],
@@ -1490,10 +1488,52 @@ fn lower_expression(
             }
         }
         hir::ExpressionKind::Break { label, value } => {
-            todo!("lower break to MIR");
+            let label = label.expect(
+                "all break expressions should have labels after type checking",
+            );
+            let label_destination = label_scope.lookup(&label).expect(
+                "all break expressions should have valid labels after type \
+                 checking",
+            );
+            let break_value_slot = label_destination.break_value_slot;
+            let break_dst = label_destination.break_dst;
+            match value {
+                Some(expr) => lower_expression(
+                    expr,
+                    ctx,
+                    break_value_slot,
+                    body,
+                    value_scope,
+                    label_scope,
+                    break_dst,
+                    compilation_unit,
+                ),
+                None => body.insert_block(BasicBlock {
+                    operations: vec![BasicOperation::Assign(
+                        Place::from(break_value_slot),
+                        Value::Operand(Operand::Constant(Constant::Tuple(
+                            Arc::new([]),
+                        ))),
+                    )],
+                    terminator: Terminator::Goto { target: break_dst },
+                }),
+            }
         }
         hir::ExpressionKind::Continue { label } => {
-            todo!("lower continue to MIR");
+            let label = label.expect(
+                "all break expressions should have labels after type checking",
+            );
+            let label_destination = label_scope.lookup(&label).expect(
+                "all break expressions should have valid labels after type \
+                 checking",
+            );
+            let continue_dst = label_destination
+                .continue_dst
+                .expect("cannot continue from non-loop context");
+            body.insert_block(BasicBlock {
+                operations: vec![],
+                terminator: Terminator::Goto { target: continue_dst },
+            })
         }
     }
 }

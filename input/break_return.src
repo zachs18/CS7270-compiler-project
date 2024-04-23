@@ -15,3 +15,10 @@ fn bar(y: i32) -> i32 {
         break y;
     }
 }
+
+fn infinite_if_zero(x: i32) -> i32 {
+    'label: loop {
+        if x == 0 { continue; }
+        break 'label 42;
+    }
+}
