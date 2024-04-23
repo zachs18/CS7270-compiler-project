@@ -95,6 +95,7 @@ fn main() -> ExitCode {
     apply_optimization!(TrimUnreachableBlocks);
     apply_optimization!(RedundantCopyEliminiation);
     apply_optimization!(DeadLocalWriteElimination);
+    apply_optimization!(TrimUnusedSlots);
 
     ExitCode::SUCCESS
 }

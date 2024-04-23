@@ -8,8 +8,8 @@ use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
 use super::{
-    BasicBlockIdx, BasicOperation, Body, Operand, Place, PlaceProjection,
-    SlotIdx, Terminator, Value,
+    BasicBlock, BasicBlockIdx, BasicOperation, Body, Operand, Place,
+    PlaceProjection, SlotIdx, Terminator, Value,
 };
 
 pub trait MirOptimization {
@@ -379,25 +379,25 @@ impl MirOptimization for TrimUnreachableBlocks {
 /// ```
 pub struct RedundantCopyEliminiation;
 
-fn replace_in_value(
+fn replace_copy_in_value(
     value: &mut Value, slot: SlotIdx, new_operand: &Operand,
 ) -> bool {
     match value {
         Value::Operand(operand) => {
-            replace_in_operand(operand, slot, new_operand)
+            replace_copy_in_operand(operand, slot, new_operand)
         }
         Value::BinaryOp(_, lhs, rhs) => {
             let mut changed = false;
-            changed |= replace_in_operand(lhs, slot, new_operand);
-            changed |= replace_in_operand(rhs, slot, new_operand);
+            changed |= replace_copy_in_operand(lhs, slot, new_operand);
+            changed |= replace_copy_in_operand(rhs, slot, new_operand);
             changed
         }
-        Value::Not(value) => replace_in_value(value, slot, new_operand),
-        Value::Negate(value) => replace_in_value(value, slot, new_operand),
+        Value::Not(value) => replace_copy_in_value(value, slot, new_operand),
+        Value::Negate(value) => replace_copy_in_value(value, slot, new_operand),
     }
 }
 
-fn replace_in_operand(
+fn replace_copy_in_operand(
     operand: &mut Operand, slot: SlotIdx, new_operand: &Operand,
 ) -> bool {
     match operand {
@@ -416,7 +416,7 @@ fn replace_in_operand(
 /// write to `src_local`, return a conflict.
 ///
 /// Returns whether a change was made, and whether a conflict was made.
-fn replace_in_operation(
+fn replace_copy_in_operation(
     op: &mut BasicOperation, slot: SlotIdx, new_operand: &Operand,
     src_local: Option<SlotIdx>,
 ) -> (bool, bool) {
@@ -433,7 +433,7 @@ fn replace_in_operation(
             #[cfg(any())]
             for projection in &mut place.projections {}
 
-            changed |= replace_in_value(value, slot, new_operand);
+            changed |= replace_copy_in_value(value, slot, new_operand);
 
             (changed, conflict)
         }
@@ -483,8 +483,12 @@ impl MirOptimization for RedundantCopyEliminiation {
                 // the rest of the block.
                 let new_operand = operand.clone();
                 for op in &mut block.operations[idx + 1..] {
-                    let (c, encountered_conflict) =
-                        replace_in_operation(op, slot, &new_operand, src_local);
+                    let (c, encountered_conflict) = replace_copy_in_operation(
+                        op,
+                        slot,
+                        &new_operand,
+                        src_local,
+                    );
                     changed |= c;
                     if encountered_conflict {
                         continue 'this_block;
@@ -495,10 +499,11 @@ impl MirOptimization for RedundantCopyEliminiation {
                 // the terminator.
                 match &mut block.terminator {
                     Terminator::Call { func, args, .. } => {
-                        changed |= replace_in_value(func, slot, &new_operand);
+                        changed |=
+                            replace_copy_in_value(func, slot, &new_operand);
                         for arg in args {
                             changed |=
-                                replace_in_value(arg, slot, &new_operand);
+                                replace_copy_in_value(arg, slot, &new_operand);
                         }
                         // TODO: apply opt in place projections
                         #[cfg(any())]
@@ -576,9 +581,7 @@ pub struct DeadLocalWriteElimination;
 
 fn find_reads_in_value_read(slots: &mut [bool], value: &Value) {
     match value {
-        Value::Operand(operand) => {
-            find_reads_in_operand_read(slots, operand);
-        }
+        Value::Operand(operand) => find_reads_in_operand_read(slots, operand),
         Value::BinaryOp(_, lhs, rhs) => {
             find_reads_in_operand_read(slots, lhs);
             find_reads_in_operand_read(slots, rhs);
@@ -592,16 +595,7 @@ fn find_reads_in_value_read(slots: &mut [bool], value: &Value) {
 /// `Value::Operand`, set the corresponding element of `slots` to `true`.
 fn find_reads_in_operand_read(slots: &mut [bool], operand: &Operand) {
     match operand {
-        Operand::Copy(place) => {
-            slots[place.local.0] = true;
-            for projection in &place.projections {
-                match projection {
-                    PlaceProjection::ConstantIndex(..)
-                    | PlaceProjection::Deref => {}
-                    PlaceProjection::Index(idx) => slots[idx.0] = true,
-                }
-            }
-        }
+        Operand::Copy(place) => find_reads_in_place_read(slots, place),
         Operand::Constant(..) => {}
     }
 }
@@ -695,5 +689,265 @@ impl MirOptimization for DeadLocalWriteElimination {
         }
 
         any_removed
+    }
+}
+
+/// MIR optimization that removes slots which are not read or written in any
+/// block.
+///
+/// Note that `_0` (the return slot) and argument slots will never be removed.
+///
+/// Examples:
+/// ```text
+/// // Before
+/// bb0 {
+///     goto -> bb1
+/// }
+/// bb1 {
+///     op1;
+///     goto -> bb3
+/// }
+/// bb2 {
+///     op2;
+///     goto -> bb3
+/// }
+/// bb3 {
+///     return
+/// }
+/// // After
+/// bb0 {
+///     goto -> bb1
+/// }
+/// bb1 {
+///     op1;
+///     goto -> bb3
+/// }
+/// bb3 {
+///     return
+/// }
+/// ```
+pub struct TrimUnusedSlots;
+
+fn find_slot_uses_in_value(slots: &mut [bool], value: &Value) {
+    match value {
+        Value::Operand(operand) => {
+            find_slot_uses_in_operand(slots, operand);
+        }
+        Value::BinaryOp(_, lhs, rhs) => {
+            find_slot_uses_in_operand(slots, lhs);
+            find_slot_uses_in_operand(slots, rhs);
+        }
+        Value::Not(value) | Value::Negate(value) => {
+            find_slot_uses_in_value(slots, value)
+        }
+    }
+}
+
+fn find_slot_uses_in_operand(slots: &mut [bool], operand: &Operand) {
+    match operand {
+        Operand::Constant(..) => {}
+        Operand::Copy(place) => find_slot_uses_in_place(slots, place),
+    }
+}
+
+fn find_slot_uses_in_place(slots: &mut [bool], place: &Place) {
+    slots[place.local.0] = true;
+    for projection in &place.projections {
+        match projection {
+            PlaceProjection::Index(slot) => slots[slot.0] = true,
+            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
+        }
+    }
+}
+
+fn find_slot_uses_in_basic_block(slots: &mut [bool], block: &BasicBlock) {
+    for op in &block.operations {
+        find_slot_uses_in_basic_operation(slots, op);
+    }
+
+    find_slot_uses_in_terminator(slots, &block.terminator);
+}
+
+fn find_slot_uses_in_basic_operation(slots: &mut [bool], op: &BasicOperation) {
+    match op {
+        BasicOperation::Nop => {}
+        BasicOperation::Assign(place, value) => {
+            find_slot_uses_in_place(slots, place);
+            find_slot_uses_in_value(slots, value);
+        }
+    }
+}
+
+fn find_slot_uses_in_terminator(slots: &mut [bool], terminator: &Terminator) {
+    match terminator {
+        Terminator::SwitchBool { scrutinee, .. } => {
+            slots[scrutinee.0] = true;
+        }
+        Terminator::SwitchCmp { lhs, rhs, .. } => {
+            slots[lhs.0] = true;
+            slots[rhs.0] = true;
+        }
+        Terminator::Goto { .. }
+        | Terminator::Return
+        | Terminator::Unreachable => {}
+        Terminator::Call { func, args, return_destination, .. } => {
+            find_slot_uses_in_value(slots, func);
+            for arg in args {
+                find_slot_uses_in_value(slots, arg);
+            }
+            find_slot_uses_in_place(slots, return_destination);
+        }
+        Terminator::Error => unreachable!(),
+    }
+}
+
+fn replace_slot(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, slot: &mut SlotIdx,
+) -> bool {
+    match slots.get(slot) {
+        // Don't replace if it's already the same
+        Some(new_slot) if *new_slot == *slot => false,
+        Some(new_slot) => {
+            *slot = *new_slot;
+            true
+        }
+        None => false,
+    }
+}
+
+fn replace_slot_uses_in_value(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, value: &mut Value,
+) -> bool {
+    match value {
+        Value::Operand(operand) => replace_slot_uses_in_operand(slots, operand),
+        Value::BinaryOp(_, lhs, rhs) => {
+            let mut changed = false;
+            changed |= replace_slot_uses_in_operand(slots, lhs);
+            changed |= replace_slot_uses_in_operand(slots, rhs);
+            changed
+        }
+        Value::Not(value) | Value::Negate(value) => {
+            replace_slot_uses_in_value(slots, value)
+        }
+    }
+}
+
+fn replace_slot_uses_in_operand(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, operand: &mut Operand,
+) -> bool {
+    match operand {
+        Operand::Constant(_) => false,
+        Operand::Copy(place) => replace_slot_uses_in_place(slots, place),
+    }
+}
+
+fn replace_slot_uses_in_place(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, place: &mut Place,
+) -> bool {
+    let mut changed = replace_slot(slots, &mut place.local);
+    for projection in &mut place.projections {
+        match projection {
+            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
+            PlaceProjection::Index(slot) => {
+                changed |= replace_slot(slots, slot);
+            }
+        }
+    }
+    changed
+}
+
+fn replace_slot_uses_in_basic_block(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, block: &mut BasicBlock,
+) -> bool {
+    let mut changed = false;
+
+    for op in &mut block.operations {
+        changed |= replace_slot_uses_in_basic_operation(slots, op);
+    }
+
+    changed |= replace_slot_uses_in_terminator(slots, &mut block.terminator);
+
+    changed
+}
+
+fn replace_slot_uses_in_basic_operation(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, op: &mut BasicOperation,
+) -> bool {
+    match op {
+        BasicOperation::Nop => false,
+        BasicOperation::Assign(place, value) => {
+            let mut changed = false;
+            changed |= replace_slot_uses_in_place(slots, place);
+            changed |= replace_slot_uses_in_value(slots, value);
+            changed
+        }
+    }
+}
+
+fn replace_slot_uses_in_terminator(
+    slots: &BTreeMap<SlotIdx, SlotIdx>, terminator: &mut Terminator,
+) -> bool {
+    match terminator {
+        Terminator::Goto { .. }
+        | Terminator::Unreachable
+        | Terminator::Return => false,
+        Terminator::SwitchBool { scrutinee, .. } => {
+            replace_slot(slots, scrutinee)
+        }
+        Terminator::SwitchCmp { lhs, rhs, .. } => {
+            let mut changed = false;
+            changed |= replace_slot(slots, lhs);
+            changed |= replace_slot(slots, rhs);
+            changed
+        }
+        Terminator::Call { func, args, return_destination, .. } => {
+            let mut changed = false;
+            changed |= replace_slot_uses_in_value(slots, func);
+
+            for arg in args {
+                changed |= replace_slot_uses_in_value(slots, arg);
+            }
+
+            changed |= replace_slot_uses_in_place(slots, return_destination);
+
+            changed
+        }
+        Terminator::Error => unreachable!(),
+    }
+}
+
+impl MirOptimization for TrimUnusedSlots {
+    fn apply(&self, body: &mut Body) -> bool {
+        let mut slots = vec![false; body.slots.len()];
+        // Return slot and argument slots are always considered used
+        slots[..=body.argc].fill(true);
+
+        // Find all slot uses
+        for block in &body.basic_blocks {
+            find_slot_uses_in_basic_block(&mut slots, block);
+        }
+
+        if slots.iter().all(|&used| used) {
+            // All slots are used, no changed
+            return false;
+        }
+
+        // Remove unused slots
+        let mut iter = slots.iter().copied();
+        body.slots.retain(|_| iter.next().unwrap_or(true));
+
+        // Replace slots with their new values
+        let slot_idx_mapping: BTreeMap<SlotIdx, SlotIdx> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, used)| used.then_some(SlotIdx(idx)))
+            .zip((0..).map(SlotIdx))
+            .collect();
+
+        for block in &mut body.basic_blocks {
+            replace_slot_uses_in_basic_block(&slot_idx_mapping, block);
+        }
+
+        true
     }
 }
