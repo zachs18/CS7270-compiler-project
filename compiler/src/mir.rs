@@ -1460,12 +1460,40 @@ fn lower_expression(
 
             initial_block
         }
-        hir::ExpressionKind::Break { label, value } => {
-            todo!("lower break to MIR")
+        hir::ExpressionKind::Return { value } => {
+            let return_block = body.temp_block();
+            match value {
+                Some(expr) => {
+                    let initial_block = lower_expression(
+                        expr,
+                        ctx,
+                        SlotIdx(0),
+                        body,
+                        value_scope,
+                        label_scope,
+                        return_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    return_block.update(body, vec![], Terminator::Return);
+                    initial_block
+                }
+                None => return_block.update(
+                    body,
+                    vec![BasicOperation::Assign(
+                        Place::from(SlotIdx(0)),
+                        Value::Operand(Operand::Constant(Constant::Tuple(
+                            Arc::new([]),
+                        ))),
+                    )],
+                    Terminator::Return,
+                ),
+            }
         }
-        hir::ExpressionKind::Return { value } => todo!("lower return to MIR"),
+        hir::ExpressionKind::Break { label, value } => {
+            todo!("lower break to MIR");
+        }
         hir::ExpressionKind::Continue { label } => {
-            todo!("lower continue to MIR")
+            todo!("lower continue to MIR");
         }
     }
 }
