@@ -1,0 +1,7 @@
+extern fn sum(arr: *mut u64, len: usize) -> u64 {
+    let mut sum = 0;
+    for i in 0..len {
+        sum = sum + arr[i];
+    }
+    sum
+}

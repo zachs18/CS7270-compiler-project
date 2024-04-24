@@ -1406,7 +1406,79 @@ fn lower_value_expression(
              lower_expression"
         ),
         hir::ExpressionKind::Index { base, index } => {
-            todo!("lower indexing to MIR")
+            let index_slot =
+                body.new_slot(compilation_unit.lower_type(index.type_, ctx));
+
+            let intermediate_block = body.temp_block();
+
+            let base_ty = compilation_unit.lower_type(base.type_, ctx);
+            let base_tykind = &compilation_unit.types[base_ty.0];
+
+            match base_tykind {
+                TypeKind::Pointer { mutability, pointee } => {
+                    // Evaluate pointer into new slot, then add index, then
+                    // deref pointer
+                    let ptr_slot = body.new_slot(base_ty);
+                    let initial_block = lower_value_expression(
+                        base,
+                        ctx,
+                        ptr_slot,
+                        body,
+                        value_scope,
+                        label_scope,
+                        intermediate_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    let after_index_block = body.temp_block();
+                    let index_initial_block = lower_value_expression(
+                        index,
+                        ctx,
+                        index_slot,
+                        body,
+                        value_scope,
+                        label_scope,
+                        after_index_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    intermediate_block.update(
+                        body,
+                        vec![],
+                        Terminator::Goto { target: index_initial_block },
+                    );
+                    let ops = vec![
+                        BasicOperation::Assign(
+                            Place::from(ptr_slot),
+                            Value::BinaryOp(
+                                BinaryOp::Arithmetic(
+                                    crate::ast::ArithmeticOp::Add,
+                                ),
+                                Operand::Copy(Place::from(ptr_slot)),
+                                Operand::Copy(Place::from(index_slot)),
+                            ),
+                        ),
+                        BasicOperation::Assign(
+                            Place::from(dst_slot),
+                            Value::Operand(Operand::Copy(Place {
+                                local: ptr_slot,
+                                projections: vec![PlaceProjection::Deref],
+                            })),
+                        ),
+                    ];
+                    after_index_block.update(
+                        body,
+                        ops,
+                        Terminator::Goto { target: next_block },
+                    );
+                    initial_block
+                }
+                TypeKind::Array { element, length } => todo!(),
+                TypeKind::Slice { element } => todo!(),
+                TypeKind::Tuple(_) => todo!(),
+                _ => unreachable!(
+                    "cannot index {base_ty:?} (TODO: type-checking should \
+                     have caught this)"
+                ),
+            }
         }
         hir::ExpressionKind::Call { function, args } => {
             // Create slots for the function and each argument, then evaluate
