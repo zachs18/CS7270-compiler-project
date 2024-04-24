@@ -18,7 +18,9 @@ use itertools::Itertools;
 
 use crate::{
     ast::BinaryOp,
-    hir::{self, BlockLabel, HirCtx, Mutability, PointerSized, Symbol},
+    hir::{
+        self, BlockLabel, HirCtx, Mutability, PointerSized, Symbol, UnaryOp,
+    },
     token::Ident,
     util::{FmtSlice, Scope},
 };
@@ -45,9 +47,11 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
             hir::Item::FnItem(_) => {
                 compilation_unit.items.push(Either::Right(ItemKindStub::Fn))
             }
-            hir::Item::StaticItem(_) => {
-                compilation_unit.items.push(Either::Right(ItemKindStub::Static))
-            }
+            hir::Item::StaticItem(item) => compilation_unit.items.push(
+                Either::Right(ItemKindStub::Static {
+                    mutability: Mutability::from_bool(item.mut_token.is_some()),
+                }),
+            ),
         }
     }
     for (idx, item) in items.iter().enumerate() {
@@ -94,7 +98,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                     panic!("extern static must have a non-synthetic name");
                 };
                 let item = ItemKind::DeclaredExternStatic {
-                    mutable: mut_token.is_some(),
+                    mutability: Mutability::from_bool(mut_token.is_some()),
                     name,
                 };
                 compilation_unit.items[idx] = Either::Left(item);
@@ -148,7 +152,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                 );
                 let item = if extern_token.is_none() {
                     ItemKind::LocalStatic {
-                        mutable: mut_token.is_some(),
+                        mutability: Mutability::from_bool(mut_token.is_some()),
                         initializer: body,
                     }
                 } else {
@@ -156,7 +160,7 @@ pub fn lower_hir_to_mir(items: &[hir::Item], ctx: &HirCtx) -> CompilationUnit {
                         panic!("extern static must have a non-synthetic name");
                     };
                     ItemKind::DefinedExternStatic {
-                        mutable: mut_token.is_some(),
+                        mutability: Mutability::from_bool(mut_token.is_some()),
                         name,
                         initializer: body,
                     }
@@ -202,11 +206,13 @@ impl CompilationUnit {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 let FmtType(this, ty) = *self;
                 match this.types[ty.0] {
-                    TypeKind::Pointer { mutable: true, pointee } => {
-                        write!(f, "*mut {}", this.display_type(pointee))
-                    }
-                    TypeKind::Pointer { mutable: false, pointee } => {
-                        write!(f, "*const {}", this.display_type(pointee))
+                    TypeKind::Pointer { mutability, pointee } => {
+                        write!(
+                            f,
+                            "*{} {}",
+                            mutability,
+                            this.display_type(pointee)
+                        )
                     }
                     TypeKind::Array { element, length } => {
                         write!(f, "[{}; {length}]", this.display_type(element))
@@ -349,30 +355,29 @@ impl CompilationUnit {
     ) -> fmt::Result {
         let mutable_str = |m| if m { "mut " } else { "" };
         match *kind {
-            ItemKind::DeclaredExternStatic { mutable, .. } => {
+            ItemKind::DeclaredExternStatic { mutability, .. } => {
                 writeln!(
                     f,
-                    "    extern static {}{name}: {};",
-                    mutable_str(mutable),
+                    "    extern static {mutability} {name}: {};",
                     self.display_type(ty)
                 )
             }
             ItemKind::DefinedExternStatic {
-                mutable, ref initializer, ..
+                mutability,
+                ref initializer,
+                ..
             } => {
                 write!(
                     f,
-                    "    extern static {}{name}: {} = ",
-                    mutable_str(mutable),
+                    "    extern static {mutability} {name}: {} = ",
                     self.display_type(ty)
                 )?;
                 self.pretty_print_body(initializer, f)
             }
-            ItemKind::LocalStatic { mutable, ref initializer, .. } => {
+            ItemKind::LocalStatic { mutability, ref initializer, .. } => {
                 write!(
                     f,
-                    "    static {}{name}: {} = ",
-                    mutable_str(mutable),
+                    "    static {mutability} {name}: {} = ",
                     self.display_type(ty)
                 )?;
                 self.pretty_print_body(initializer, f)
@@ -481,7 +486,7 @@ impl CompilationUnit {
 
     fn lower_mutability(
         &mut self, mutability: hir::MutIdx, ctx: &HirCtx,
-    ) -> bool {
+    ) -> Mutability {
         ctx.resolve_mut(mutability)
             .expect("types should all be resolved after hir type checking")
     }
@@ -493,7 +498,7 @@ impl CompilationUnit {
         {
             &hir::TypeKind::Pointer { mutability, pointee } => {
                 let tk = TypeKind::Pointer {
-                    mutable: self.lower_mutability(mutability, ctx),
+                    mutability: self.lower_mutability(mutability, ctx),
                     pointee: self.lower_type(pointee, ctx),
                 };
                 self.insert_type(tk)
@@ -575,7 +580,7 @@ pub struct TypeIdx(usize);
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
-    Pointer { mutable: bool, pointee: TypeIdx },
+    Pointer { mutability: Mutability, pointee: TypeIdx },
     Array { element: TypeIdx, length: usize },
     Slice { element: TypeIdx },
     Integer { signed: bool, bits: Either<u32, PointerSized> },
@@ -591,13 +596,32 @@ pub struct ItemIdx(usize);
 
 #[derive(Debug)]
 enum ItemKind {
-    DeclaredExternStatic { name: Ident, mutable: bool },
-    DefinedExternStatic { name: Ident, mutable: bool, initializer: Body },
-    LocalStatic { mutable: bool, initializer: Body },
-    DeclaredExternFn { name: Ident },
-    DefinedExternFn { name: Ident, body: Body },
-    LocalFn { body: Body },
-    StringLiteral { data: &'static [u8] },
+    DeclaredExternStatic {
+        name: Ident,
+        mutability: Mutability,
+    },
+    DefinedExternStatic {
+        name: Ident,
+        mutability: Mutability,
+        initializer: Body,
+    },
+    LocalStatic {
+        mutability: Mutability,
+        initializer: Body,
+    },
+    DeclaredExternFn {
+        name: Ident,
+    },
+    DefinedExternFn {
+        name: Ident,
+        body: Body,
+    },
+    LocalFn {
+        body: Body,
+    },
+    StringLiteral {
+        data: &'static [u8],
+    },
 }
 
 /// Only used while lowering, so that items being lowered can know how to access
@@ -606,7 +630,7 @@ enum ItemKind {
 /// There are never stubbed string literals.
 #[derive(Debug)]
 enum ItemKindStub {
-    Static,
+    Static { mutability: Mutability },
     Fn,
 }
 
@@ -1078,10 +1102,10 @@ fn lower_value_expression(
                                 | ItemKind::DefinedExternStatic { .. }
                                 | ItemKind::LocalStatic { .. },
                             )
-                            | Either::Right(ItemKindStub::Static) => {
+                            | Either::Right(ItemKindStub::Static { .. }) => {
                                 let addr_ty = compilation_unit.insert_type(
                                     TypeKind::Pointer {
-                                        mutable: false,
+                                        mutability: Mutability::Constant,
                                         pointee: *type_idx,
                                     },
                                 );
@@ -1542,7 +1566,74 @@ fn lower_assignment_expression(
         compilation_unit,
     );
 
-    todo!("actually lower assignment");
+    match &lhs.kind {
+        hir::ExpressionKind::Wildcard => {
+            // Don't need to do assign anything
+            intermediate_block.update(
+                body,
+                vec![],
+                Terminator::Goto { target: next_block },
+            );
+        }
+        hir::ExpressionKind::Ident(symbol) => {
+            match value_scope.lookup(symbol) {
+                Some(&(Mutability::Mutable, local)) => {
+                    intermediate_block.update(
+                        body,
+                        vec![BasicOperation::Assign(
+                            Place::from(local),
+                            Value::Operand(Operand::Copy(Place::from(
+                                intermediate_slot,
+                            ))),
+                        )],
+                        Terminator::Goto { target: next_block },
+                    );
+                }
+                Some((Mutability::Constant, local)) => {
+                    unreachable!(
+                        "cannot assign to non-mut local {symbol} \
+                         (type-checking should have caught this)"
+                    )
+                }
+                None => match compilation_unit.globals.get(&symbol) {
+                    Some((item, _ty)) => match compilation_unit.items[item.0] {
+                        Either::Left(_) => todo!(),
+                        Either::Right(_) => todo!(),
+                    },
+                    None => unreachable!(
+                        "unresolved symbol {symbol} (type-checking should \
+                         have caught this)"
+                    ),
+                },
+            }
+            todo!("assign to local or static");
+        }
+        hir::ExpressionKind::Array(_) => {
+            todo!("destructuring assignment of array")
+        }
+        hir::ExpressionKind::Tuple(_) => {
+            todo!("destructuring assignment of tuple")
+        }
+        hir::ExpressionKind::Index { .. } => todo!("assignment to index"),
+        hir::ExpressionKind::UnaryOp { op: UnaryOp::Deref, operand } => {
+            todo!("assignment to deref")
+        }
+        hir::ExpressionKind::UnaryOp { .. }
+        | hir::ExpressionKind::If { .. }
+        | hir::ExpressionKind::Loop { .. }
+        | hir::ExpressionKind::Block { .. }
+        | hir::ExpressionKind::Match { .. }
+        | hir::ExpressionKind::Call { .. }
+        | hir::ExpressionKind::Continue { .. }
+        | hir::ExpressionKind::Break { .. }
+        | hir::ExpressionKind::Return { .. }
+        | hir::ExpressionKind::Integer(_)
+        | hir::ExpressionKind::StringLiteral(_)
+        | hir::ExpressionKind::Bool(_)
+        | hir::ExpressionKind::BinaryOp { .. } => {
+            panic!("can only assign to local variables, static items, ")
+        }
+    }
 
     initial_block_idx
 }

@@ -13,6 +13,7 @@
 //! * `Expression::{Break, Loop, Continue}::label` are `Some`
 //! * todo
 
+use core::fmt;
 use std::{
     collections::{HashMap, VecDeque},
     hash::Hash,
@@ -68,10 +69,19 @@ pub enum Mutability {
     Mutable,
 }
 impl Mutability {
-    fn from_bool(mutable: bool) -> Mutability {
+    pub fn from_bool(mutable: bool) -> Mutability {
         match mutable {
             false => Mutability::Constant,
             true => Mutability::Mutable,
+        }
+    }
+}
+
+impl fmt::Display for Mutability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Mutability::Constant => f.write_str("const"),
+            Mutability::Mutable => f.write_str("mut"),
         }
     }
 }
@@ -284,12 +294,8 @@ impl<'a> HirCtx<'a> {
     }
 
     /// Returns `None` if the given `MutIdx` is not a concrete mutability.
-    pub fn resolve_mut(&self, mutability: MutIdx) -> Option<bool> {
-        match self.ty_ctx.mut_substitutions.get(mutability.0) {
-            Some(Some(Mutability::Constant)) => Some(false),
-            Some(Some(Mutability::Mutable)) => Some(true),
-            None | Some(None) => None,
-        }
+    pub fn resolve_mut(&self, mutability: MutIdx) -> Option<Mutability> {
+        self.ty_ctx.mut_substitutions.get(mutability.0).copied().flatten()
     }
 
     fn new_parent(parent: &'a mut HirCtx<'_>) -> Self {
