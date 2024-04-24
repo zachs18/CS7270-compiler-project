@@ -1232,18 +1232,16 @@ fn lower_value_expression(
             hir::UnaryOp::AsCast { to_type } => todo!(),
         },
         hir::ExpressionKind::BinaryOp { lhs, op, rhs } => match op {
-            crate::ast::BinaryOp::Assignment => {
-                // Lower assignment as:
-                // 1. evalute rhs into a new slot
-                // 2. Depending on lhs: ident-expression if local: write to slot
-                //    ident-expression if static: new slot addr of static, write
-                //    to deref other: TODO
-
-                todo!(
-                    "assignment expressions: need to lower lhs as a \
-                     place-expression, etc"
-                );
-            }
+            crate::ast::BinaryOp::Assignment => lower_assignment_expression(
+                lhs,
+                rhs,
+                ctx,
+                body,
+                value_scope,
+                label_scope,
+                next_block,
+                compilation_unit,
+            ),
             crate::ast::BinaryOp::Arithmetic(arith_op) => {
                 if arith_op.is_short_circuit() {
                     todo!("short-circuiting ops");
@@ -1577,7 +1575,12 @@ fn lower_assignment_expression(
         }
         hir::ExpressionKind::Ident(symbol) => {
             match value_scope.lookup(symbol) {
-                Some(&(Mutability::Mutable, local)) => {
+                Some(&(mutability, local)) => {
+                    assert!(
+                        mutability == Mutability::Mutable,
+                        "cannot assign to non-mut local {symbol} (TODO: \
+                         type-checking should have caught this)"
+                    );
                     intermediate_block.update(
                         body,
                         vec![BasicOperation::Assign(
@@ -1589,16 +1592,68 @@ fn lower_assignment_expression(
                         Terminator::Goto { target: next_block },
                     );
                 }
-                Some((Mutability::Constant, local)) => {
-                    unreachable!(
-                        "cannot assign to non-mut local {symbol} \
-                         (type-checking should have caught this)"
-                    )
-                }
-                None => match compilation_unit.globals.get(&symbol) {
-                    Some((item, _ty)) => match compilation_unit.items[item.0] {
-                        Either::Left(_) => todo!(),
-                        Either::Right(_) => todo!(),
+                None => match compilation_unit.globals.get(symbol) {
+                    Some((item, type_idx)) => match compilation_unit.items
+                        [item.0]
+                    {
+                        Either::Left(
+                            ItemKind::DeclaredExternFn { .. }
+                            | ItemKind::DefinedExternFn { .. }
+                            | ItemKind::LocalFn { .. },
+                        )
+                        | Either::Right(ItemKindStub::Fn) => {
+                            panic!("cannot assign to function {symbol}")
+                        }
+                        Either::Left(ItemKind::StringLiteral { .. }) => {
+                            panic!("cannot assign to string literal")
+                        }
+                        Either::Left(
+                            ItemKind::LocalStatic { mutability, .. }
+                            | ItemKind::DefinedExternStatic {
+                                mutability, ..
+                            }
+                            | ItemKind::DeclaredExternStatic {
+                                mutability, ..
+                            },
+                        )
+                        | Either::Right(ItemKindStub::Static { mutability }) => {
+                            assert!(
+                                mutability == Mutability::Mutable,
+                                "cannot assign to immutable static {symbol} \
+                                 (TODO: type-checking should have caught this)"
+                            );
+                            let addr_ty = compilation_unit.insert_type(
+                                TypeKind::Pointer {
+                                    mutability: Mutability::Mutable,
+                                    pointee: *type_idx,
+                                },
+                            );
+                            let addr_slot = body.new_slot(addr_ty);
+                            let ops = vec![
+                                BasicOperation::Assign(
+                                    Place::from(addr_slot),
+                                    Value::Operand(Operand::Constant(
+                                        Constant::ItemAddress(*symbol),
+                                    )),
+                                ),
+                                BasicOperation::Assign(
+                                    Place {
+                                        local: addr_slot,
+                                        projections: vec![
+                                            PlaceProjection::Deref,
+                                        ],
+                                    },
+                                    Value::Operand(Operand::Copy(Place::from(
+                                        intermediate_slot,
+                                    ))),
+                                ),
+                            ];
+                            intermediate_block.update(
+                                body,
+                                ops,
+                                Terminator::Goto { target: next_block },
+                            );
+                        }
                     },
                     None => unreachable!(
                         "unresolved symbol {symbol} (type-checking should \
@@ -1606,7 +1661,6 @@ fn lower_assignment_expression(
                     ),
                 },
             }
-            todo!("assign to local or static");
         }
         hir::ExpressionKind::Array(_) => {
             todo!("destructuring assignment of array")
@@ -1631,7 +1685,10 @@ fn lower_assignment_expression(
         | hir::ExpressionKind::StringLiteral(_)
         | hir::ExpressionKind::Bool(_)
         | hir::ExpressionKind::BinaryOp { .. } => {
-            panic!("can only assign to local variables, static items, ")
+            panic!(
+                "can only assign to local variables and static items, not \
+                 {lhs:?}"
+            )
         }
     }
 
