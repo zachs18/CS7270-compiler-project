@@ -1706,7 +1706,41 @@ fn lower_statement(
     next_block: BasicBlockIdx, compilation_unit: &mut CompilationUnit,
 ) -> BasicBlockIdx {
     match stmt {
-        hir::Statement::LetStatement { pattern, type_, initializer } => todo!(),
+        hir::Statement::LetStatement { pattern, type_, initializer } => {
+            match initializer {
+                Some(initializer) => {
+                    let intermeidate_block = body.temp_block();
+                    let intermediate_slot =
+                        body.new_slot(compilation_unit.lower_type(*type_, ctx));
+                    let initial_block = lower_value_expression(
+                        initializer,
+                        ctx,
+                        intermediate_slot,
+                        body,
+                        value_scope,
+                        label_scope,
+                        intermeidate_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    let pattern_initial_block = lower_pattern(
+                        pattern,
+                        ctx,
+                        intermediate_slot,
+                        body,
+                        value_scope,
+                        next_block,
+                        compilation_unit,
+                    );
+                    intermeidate_block.update(
+                        body,
+                        vec![],
+                        Terminator::Goto { target: pattern_initial_block },
+                    );
+                    initial_block
+                }
+                None => todo!(),
+            }
+        }
         hir::Statement::Expression { expression, .. } => {
             // This slot is not referenced by anything else, so it will be
             // optimized out with dead-local-store elimination enabled (once
