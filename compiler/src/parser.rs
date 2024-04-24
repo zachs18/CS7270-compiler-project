@@ -618,26 +618,30 @@ fn fixup_binary_operators(
             // front
             match associativity {
                 Associativity::Left | Associativity::None => {
+                    // expr is the "current" expression, starting from the
+                    // leftmost subexpression, and adding rhs's.
                     let mut expr = operands.pop_back().unwrap();
-                    while let Some(lhs) = operands.pop_back() {
+                    while let Some(rhs) = operands.pop_back() {
                         let op = operators.pop_back().unwrap();
                         expr = Expression::BinaryOp {
-                            lhs: Box::new(lhs),
+                            lhs: Box::new(expr),
                             op,
-                            rhs: Box::new(expr),
+                            rhs: Box::new(rhs),
                         };
                     }
                     debug_assert!(operators.is_empty());
                     Ok(expr)
                 }
                 Associativity::Right => {
+                    // expr is the "current" expression, starting from the
+                    // rightmost subexpression, and adding lhs's.
                     let mut expr = operands.pop_front().unwrap();
-                    while let Some(rhs) = operands.pop_front() {
+                    while let Some(lhs) = operands.pop_front() {
                         let op = operators.pop_front().unwrap();
                         expr = Expression::BinaryOp {
-                            lhs: Box::new(expr),
+                            lhs: Box::new(lhs),
                             op,
-                            rhs: Box::new(rhs),
+                            rhs: Box::new(expr),
                         };
                     }
                     debug_assert!(operators.is_empty());
