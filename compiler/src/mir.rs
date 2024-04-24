@@ -852,6 +852,9 @@ fn lower_block(
     // * statements, with tail: lower statements, assign tail to dst, jump to
     //   next_block
 
+    // New value scope since we're in a new block
+    let mut value_scope = Scope::new(Some(value_scope));
+
     match block {
         hir::Block { statements, tail: None } if statements.is_empty() => {
             next_block
@@ -864,7 +867,7 @@ fn lower_block(
                 ctx,
                 dst,
                 body,
-                value_scope,
+                &mut value_scope,
                 label_scope,
                 next_block,
                 compilation_unit,
@@ -882,7 +885,7 @@ fn lower_block(
                     stmt,
                     ctx,
                     body,
-                    value_scope,
+                    &mut value_scope,
                     label_scope,
                     next_intermediate_block.as_basic_block_idx(),
                     compilation_unit,
@@ -914,7 +917,7 @@ fn lower_block(
                     stmt,
                     ctx,
                     body,
-                    value_scope,
+                    &mut value_scope,
                     label_scope,
                     next_intermediate_block.as_basic_block_idx(),
                     compilation_unit,
@@ -931,7 +934,7 @@ fn lower_block(
                 ctx,
                 dst,
                 body,
-                value_scope,
+                &mut value_scope,
                 label_scope,
                 next_block,
                 compilation_unit,
@@ -1329,7 +1332,6 @@ fn lower_value_expression(
                 ),
                 None => next_block,
             };
-            dbg!(next_block);
             switch_block_idx.update(
                 body,
                 vec![],
