@@ -1742,9 +1742,88 @@ fn lower_assignment_expression(
         hir::ExpressionKind::Tuple(_) => {
             todo!("destructuring assignment of tuple")
         }
-        hir::ExpressionKind::Index { .. } => todo!("assignment to index"),
+        hir::ExpressionKind::Index { base, index } => {
+            let index_slot =
+                body.new_slot(compilation_unit.lower_type(index.type_, ctx));
+
+            let base_ty = compilation_unit.lower_type(base.type_, ctx);
+            let base_tykind = &compilation_unit.types[base_ty.0];
+
+            match base_tykind {
+                TypeKind::Pointer { .. } => {
+                    // Evaluate pointer into new slot, then add index, then
+                    // write into deref'd pointer
+                    let after_base_before_index_block = body.temp_block();
+                    let ptr_slot = body.new_slot(base_ty);
+                    let base_initial_block = lower_value_expression(
+                        base,
+                        ctx,
+                        ptr_slot,
+                        body,
+                        value_scope,
+                        label_scope,
+                        after_base_before_index_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    intermediate_block.update(
+                        body,
+                        vec![],
+                        Terminator::Goto { target: base_initial_block },
+                    );
+                    let after_index_block = body.temp_block();
+                    let index_initial_block = lower_value_expression(
+                        index,
+                        ctx,
+                        index_slot,
+                        body,
+                        value_scope,
+                        label_scope,
+                        after_index_block.as_basic_block_idx(),
+                        compilation_unit,
+                    );
+                    after_base_before_index_block.update(
+                        body,
+                        vec![],
+                        Terminator::Goto { target: index_initial_block },
+                    );
+                    let ops = vec![
+                        BasicOperation::Assign(
+                            Place::from(ptr_slot),
+                            Value::BinaryOp(
+                                BinaryOp::Arithmetic(
+                                    crate::ast::ArithmeticOp::Add,
+                                ),
+                                Operand::Copy(Place::from(ptr_slot)),
+                                Operand::Copy(Place::from(index_slot)),
+                            ),
+                        ),
+                        BasicOperation::Assign(
+                            Place {
+                                local: ptr_slot,
+                                projections: vec![PlaceProjection::Deref],
+                            },
+                            Value::Operand(Operand::Copy(Place::from(
+                                intermediate_slot,
+                            ))),
+                        ),
+                    ];
+                    after_index_block.update(
+                        body,
+                        ops,
+                        Terminator::Goto { target: next_block },
+                    );
+                }
+                TypeKind::Array { .. } => todo!(),
+                TypeKind::Slice { .. } => todo!(),
+                TypeKind::Tuple(_) => todo!(),
+                _ => unreachable!(
+                    "cannot index {base_ty:?} (TODO: type-checking should \
+                     have caught this)"
+                ),
+            }
+        }
         hir::ExpressionKind::UnaryOp { op: UnaryOp::Deref, operand } => {
-            todo!("assignment to deref")
+            todo!("assignment to deref (For now, just do ptr[0] = ...)")
         }
         hir::ExpressionKind::UnaryOp { .. }
         | hir::ExpressionKind::If { .. }
