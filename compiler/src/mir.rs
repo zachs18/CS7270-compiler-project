@@ -27,6 +27,7 @@ use crate::{
 
 use self::optimizations::MirOptimization;
 
+pub mod compile;
 pub mod optimizations;
 
 /// Lower type-checked hir to mir
