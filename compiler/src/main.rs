@@ -1,8 +1,10 @@
 #![feature(get_many_mut)]
 
-use std::process::ExitCode;
+use std::{io::Write, process::ExitCode};
 
 use token::TokenTree;
+
+use crate::mir::compile::{CompilationState, ABI, ISA};
 
 mod ast;
 mod hir;
@@ -96,6 +98,19 @@ fn main() -> ExitCode {
     apply_optimization!(RedundantCopyEliminiation);
     apply_optimization!(DeadLocalWriteElimination);
     apply_optimization!(TrimUnusedSlots);
+
+    let state = CompilationState::new(ISA::RV32I, ABI::ILP32)
+        .expect("valid arch/abi combination");
+
+    let asm = mir.compile(state);
+
+    if outfilename == "-" {
+        std::io::stdout()
+            .write_all(asm.as_bytes())
+            .expect("failed to write output file");
+    } else {
+        std::fs::write(outfilename, asm).expect("failed to write output file");
+    }
 
     ExitCode::SUCCESS
 }

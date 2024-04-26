@@ -4,9 +4,19 @@
 //! ABI and ISA support for them is just so we produce object-files that work
 //! with other software.
 
-use crate::token::Ident;
+use core::fmt;
+use std::{alloc::Layout, collections::HashMap};
 
-use super::{CompilationUnit, ItemKind};
+use either::Either;
+
+use crate::{
+    hir::PointerSized,
+    mir::{CompilationUnit, ItemKind},
+};
+
+use super::{TypeIdx, TypeKind};
+
+mod const_eval;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompilationState {
@@ -38,6 +48,13 @@ impl CompilationState {
             }
         }
     }
+
+    fn pointer_size(&self) -> usize {
+        match self.abi {
+            ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => 4,
+            ABI::LP64 | ABI::LP64F | ABI::LP64D => 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,56 +75,152 @@ pub enum ABI {
     LP64D,
 }
 
+fn emit_static(
+    buffer: &mut String, compilation_unit: &CompilationUnit,
+    state: &CompilationState, value: &[u8], global: bool, alignment: usize,
+    mutable: bool, name: &str,
+) -> fmt::Result {
+    use std::fmt::Write;
+    if global {
+        writeln!(buffer, ".global {name}")?;
+    }
+    let is_bss = value.iter().all(|&b| b == 0);
+    if is_bss {
+        writeln!(buffer, ".bss {name}, {len}, {alignment}", len = value.len())?;
+    } else {
+        if mutable {
+            writeln!(buffer, ".section .rodata.{name}")?;
+        } else {
+            writeln!(buffer, ".section .data.{name}")?;
+        }
+        writeln!(buffer, ".balign {alignment}")?;
+        writeln!(buffer, "{name}:")?;
+        for b in value {
+            writeln!(buffer, ".byte {b}")?;
+        }
+    }
+    Ok(())
+}
+
 impl CompilationUnit {
-    pub fn compile(&self, state: CompilationState) -> Vec<u8> {
+    fn layout(&self, ty: TypeIdx, state: &CompilationState) -> Layout {
+        let pointer_size = state.pointer_size();
+        match self.types[ty.0] {
+            TypeKind::Array { element, length } => {
+                let element_layout = self.layout(element, state).pad_to_align();
+                let alloc_size = element_layout.size() * length;
+                Layout::from_size_align(alloc_size, element_layout.align())
+                    .expect("array too large")
+            }
+            TypeKind::Integer { bits: Either::Left(bits), .. } => {
+                let size = match bits {
+                    8 => 1,
+                    16 => 2,
+                    32 => 4,
+                    64 => 8,
+                    _ => unreachable!("unsupported integer width {bits}"),
+                };
+                Layout::from_size_align(size, size).unwrap()
+            }
+            TypeKind::Pointer { .. }
+            | TypeKind::Integer { bits: Either::Right(PointerSized), .. } => {
+                Layout::from_size_align(pointer_size, pointer_size).unwrap()
+            }
+            TypeKind::Bool => Layout::new::<bool>(),
+            TypeKind::Never => Layout::new::<()>(),
+            TypeKind::Tuple(_) => todo!(),
+            TypeKind::Slice { .. } => unimplemented!("slice types"),
+            TypeKind::Function { .. } => {
+                unimplemented!("function pointers")
+            }
+        }
+    }
+
+    pub fn compile(&self, state: CompilationState) -> String {
         let is_64 = match state.abi {
             ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => false,
             ABI::LP64 | ABI::LP64F | ABI::LP64D => true,
         };
 
-        panic!(
-            "just emit asm, it's easier than trying to figure out object, and \
-             it also means I don't have to emit relocations/relaxations/etc \
-             (as difficult-ly)"
-        );
+        let mut buffer = String::new();
 
-        assert!(!is_64, "64-bit unsupported at the moment");
-
-        let mut object_buffer: Vec<u8> = Vec::with_capacity(16384);
-        let mut writer = object::write::elf::Writer::new(
-            object::Endianness::Little,
-            is_64,
-            &mut object_buffer,
-        );
+        let mut local_symbols: HashMap<usize, String> = HashMap::new();
+        let mut local_idx = 0;
+        let mut new_local_symbol = || {
+            let idx = local_idx;
+            local_idx += 1;
+            format!(".L{idx}")
+        };
 
         for (idx, item) in self.items.iter().enumerate() {
             match item
                 .as_ref()
-                .left()
-                .expect("No stubs should be left after MIR lowering")
+                .expect_left("No stubs should be left after MIR lowering")
             {
-                ItemKind::DeclaredExternStatic { name, .. } => {
-                    let symbol = writer.add_string(name.ident.as_bytes());
-
-                    todo!()
+                ItemKind::DeclaredExternStatic { .. } => {
+                    // No ASM generated
+                }
+                ItemKind::DeclaredExternFn { .. } => {
+                    // No ASM generated
                 }
                 ItemKind::DefinedExternStatic {
                     name,
                     mutability,
                     initializer,
-                } => todo!(),
-                ItemKind::LocalStatic { mutability, initializer } => todo!(),
-                ItemKind::DeclaredExternFn { name } => todo!(),
+                } => {
+                    let value = self.const_eval(initializer, &state);
+                    let layout = self.layout(initializer.slots[0], &state);
+                    emit_static(
+                        &mut buffer,
+                        self,
+                        &state,
+                        &value,
+                        true,
+                        layout.align(),
+                        mutability.is_mutable(),
+                        name.ident,
+                    )
+                    .expect("formatting should not fail");
+                }
+                ItemKind::StringLiteral { data } => {
+                    let local_symbol = new_local_symbol();
+                    emit_static(
+                        &mut buffer,
+                        self,
+                        &state,
+                        data,
+                        false,
+                        1,
+                        false,
+                        &local_symbol,
+                    )
+                    .expect("formatting should not fail");
+                    local_symbols.insert(idx, local_symbol);
+                }
+                ItemKind::LocalStatic { mutability, initializer } => {
+                    let value = self.const_eval(initializer, &state);
+                    let local_symbol = new_local_symbol();
+                    let layout = self.layout(initializer.slots[0], &state);
+                    emit_static(
+                        &mut buffer,
+                        self,
+                        &state,
+                        &value,
+                        false,
+                        layout.align(),
+                        mutability.is_mutable(),
+                        &local_symbol,
+                    )
+                    .expect("formatting should not fail");
+                    local_symbols.insert(idx, local_symbol);
+                }
                 ItemKind::DefinedExternFn { name, body } => todo!(),
                 ItemKind::LocalFn { body } => todo!(),
-                ItemKind::StringLiteral { data } => todo!(),
             }
         }
 
-        if true {
-            todo!("draw the owl");
-        }
+        dbg!(&buffer);
 
-        object_buffer
+        buffer
     }
 }

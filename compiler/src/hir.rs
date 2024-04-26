@@ -75,6 +75,9 @@ impl Mutability {
             true => Mutability::Mutable,
         }
     }
+    pub fn is_mutable(&self) -> bool {
+        *self == Mutability::Mutable
+    }
 }
 
 impl fmt::Display for Mutability {
