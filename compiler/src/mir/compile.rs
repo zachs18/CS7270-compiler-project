@@ -5,16 +5,19 @@
 //! with other software.
 
 use core::fmt;
-use std::{alloc::Layout, collections::HashMap};
+use std::{
+    alloc::Layout,
+    collections::{HashMap, HashSet, VecDeque},
+};
 
 use either::Either;
 
 use crate::{
     hir::PointerSized,
-    mir::{CompilationUnit, ItemKind},
+    mir::{BasicOperation, CompilationUnit, ItemKind, Terminator},
 };
 
-use super::{TypeIdx, TypeKind};
+use super::{Body, TypeIdx, TypeKind};
 
 mod const_eval;
 
@@ -54,6 +57,11 @@ impl CompilationState {
             ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => 4,
             ABI::LP64 | ABI::LP64F | ABI::LP64D => 8,
         }
+    }
+
+    fn pointer_layout(&self) -> Layout {
+        let size @ align = self.pointer_size();
+        Layout::from_size_align(size, align).unwrap()
     }
 }
 
@@ -102,6 +110,99 @@ fn emit_static(
     Ok(())
 }
 
+fn emit_function(
+    buffer: &mut String, compilation_unit: &CompilationUnit,
+    state: &CompilationState, body: &super::Body, global: bool, name: &str,
+    new_local_symbol: &mut (impl ?Sized + FnMut() -> String),
+) -> fmt::Result {
+    use std::fmt::Write;
+    if global {
+        writeln!(buffer, ".global {name}")?;
+    }
+    writeln!(buffer, ".type {name},@function")?;
+    writeln!(buffer, ".section .text.{name}")?;
+    writeln!(buffer, ".balign 4")?;
+    writeln!(buffer, "{name}:")?;
+    writeln!(buffer, ".cfi_startproc")?;
+    eprintln!("TODO: CFI directives");
+
+    assert!(
+        matches!(state.abi, ABI::ILP32 | ABI::ILP32F | ABI::ILP32D),
+        "64-bit not supported"
+    );
+
+    // See if this function is a leaf
+    let is_leaf = body
+        .basic_blocks
+        .iter()
+        .any(|block| matches!(block.terminator, Terminator::Call { .. }));
+
+    // Calculate stack frame layout
+    let (stack_layout, slot_locations) =
+        compilation_unit.body_stack_layout(body, state);
+    // Allocate space for frame pointer
+    let (stack_layout, frame_pointer_offset) =
+        stack_layout.extend(state.pointer_layout()).unwrap();
+    // Allocate space for return address (only used if we call another
+    // function).
+    let (stack_layout, return_address_offset) = if !is_leaf {
+        stack_layout.extend(state.pointer_layout()).unwrap()
+    } else {
+        (stack_layout, usize::MAX)
+    };
+    // Stack must be 16-byte-aligned
+    let stack_layout = stack_layout.align_to(16).unwrap().pad_to_align();
+
+    // Function prologue:
+    // 1. Allocate stack frame
+    // 2. If not leaf, write return address
+    writeln!(buffer, "subi sp, sp, {}", stack_layout.size())?;
+    if !is_leaf {
+        writeln!(buffer, "sw ra, {}(sp)", return_address_offset)?;
+    }
+
+    // Determine the order to emit basic blocks.
+    // We try to optimize such that a target block will be immediately after a
+    // source block as often as possible, so branches are not needed.
+    // For bodies without cycles, this will be a topological sort.
+    let basic_block_order: Vec<usize> = {
+        let mut order = vec![];
+        let mut seen = HashSet::from([0]);
+        let mut queue: VecDeque<usize> = VecDeque::from([0]);
+        todo!();
+        order
+    };
+
+    // // Function epilogue
+    // todo!();
+
+    // let mut basic_block_labels: HashMap<usize, String> = HashMap::new();
+    // let mut emitted_basic_blocks: HashSet<usize> = HashSet::new();
+    // let mut basic_blocks_to_emit: VecDeque<usize> = VecDeque::from([0]);
+
+    // while let Some(block_idx) = basic_blocks_to_emit.pop_front() {
+    //     if !emitted_basic_blocks.insert(block_idx) {
+    //         continue;
+    //     }
+    //     let label = basic_block_labels
+    //         .entry(block_idx)
+    //         .or_insert_with(new_local_symbol);
+    //     writeln!(buffer, "{label}:")?;
+    //     let block = &body.basic_blocks[block_idx];
+    //     for op in &block.operations {
+    //         let BasicOperation::Assign(place, value) = op else {
+    //             continue;
+    //         };
+    //         todo!()
+    //     }
+    //     todo!()
+    // }
+
+    todo!("draw the rest of the owl");
+
+    todo!()
+}
+
 impl CompilationUnit {
     fn layout(&self, ty: TypeIdx, state: &CompilationState) -> Layout {
         let pointer_size = state.pointer_size();
@@ -134,6 +235,21 @@ impl CompilationUnit {
                 unimplemented!("function pointers")
             }
         }
+    }
+
+    /// Returns the Layout required by the stack, and the offsets of all local
+    /// slots
+    fn body_stack_layout(
+        &self, body: &Body, state: &CompilationState,
+    ) -> (Layout, Vec<usize>) {
+        let mut layout = Layout::new::<()>();
+        let mut offets = Vec::with_capacity(body.argc);
+        for &slot_ty in &body.slots {
+            let slot_layout = self.layout(slot_ty, state);
+            offets.push(layout.size());
+            layout = layout.extend(slot_layout).expect("too many locals").0;
+        }
+        (layout, offets)
     }
 
     pub fn compile(&self, state: CompilationState) -> String {
@@ -214,8 +330,32 @@ impl CompilationUnit {
                     .expect("formatting should not fail");
                     local_symbols.insert(idx, local_symbol);
                 }
-                ItemKind::DefinedExternFn { name, body } => todo!(),
-                ItemKind::LocalFn { body } => todo!(),
+                ItemKind::DefinedExternFn { name, body } => {
+                    emit_function(
+                        &mut buffer,
+                        self,
+                        &state,
+                        body,
+                        true,
+                        name.ident,
+                        &mut new_local_symbol,
+                    )
+                    .expect("formatting should not fail");
+                }
+                ItemKind::LocalFn { body } => {
+                    let local_symbol = new_local_symbol();
+                    emit_function(
+                        &mut buffer,
+                        self,
+                        &state,
+                        body,
+                        true,
+                        &local_symbol,
+                        &mut new_local_symbol,
+                    )
+                    .expect("formatting should not fail");
+                    local_symbols.insert(idx, local_symbol);
+                }
             }
         }
 
