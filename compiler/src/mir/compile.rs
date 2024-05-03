@@ -11,10 +11,14 @@ use std::{
 };
 
 use either::Either;
+use indexmap::IndexSet;
+use zachs18_stdx::OptionExt;
 
 use crate::{
     hir::PointerSized,
-    mir::{BasicOperation, CompilationUnit, ItemKind, Terminator},
+    mir::{
+        BasicBlockIdx, BasicOperation, CompilationUnit, ItemKind, Terminator,
+    },
 };
 
 use super::{Body, TypeIdx, TypeKind};
@@ -132,7 +136,7 @@ fn emit_function(
     );
 
     // See if this function is a leaf
-    let is_leaf = body
+    let is_leaf = !body
         .basic_blocks
         .iter()
         .any(|block| matches!(block.terminator, Terminator::Call { .. }));
@@ -140,10 +144,7 @@ fn emit_function(
     // Calculate stack frame layout
     let (stack_layout, slot_locations) =
         compilation_unit.body_stack_layout(body, state);
-    // Allocate space for frame pointer
-    let (stack_layout, frame_pointer_offset) =
-        stack_layout.extend(state.pointer_layout()).unwrap();
-    // Allocate space for return address (only used if we call another
+    // Allocate space for return address on stack (only used if we call another
     // function).
     let (stack_layout, return_address_offset) = if !is_leaf {
         stack_layout.extend(state.pointer_layout()).unwrap()
@@ -156,51 +157,129 @@ fn emit_function(
     // Function prologue:
     // 1. Allocate stack frame
     // 2. If not leaf, write return address
-    writeln!(buffer, "subi sp, sp, {}", stack_layout.size())?;
+    // 3. Copy arguments into stack
+    if let stack_size @ 1.. = stack_layout.size() {
+        writeln!(buffer, "subi sp, sp, {}", stack_size)?;
+    }
     if !is_leaf {
         writeln!(buffer, "sw ra, {}(sp)", return_address_offset)?;
+    }
+    for arg in 0..body.argc {
+        todo!("copy arguments to stack");
     }
 
     // Determine the order to emit basic blocks.
     // We try to optimize such that a target block will be immediately after a
     // source block as often as possible, so branches are not needed.
     // For bodies without cycles, this will be a topological sort.
-    let basic_block_order: Vec<usize> = {
-        let mut order = vec![];
-        let mut seen = HashSet::from([0]);
-        let mut queue: VecDeque<usize> = VecDeque::from([0]);
-        todo!();
-        order
+    let basic_block_order: Vec<BasicBlockIdx> = {
+        let mut emit_order = IndexSet::new();
+        let mut queue: VecDeque<BasicBlockIdx> =
+            VecDeque::from([BasicBlockIdx(0)]);
+
+        // Basically breadth-first search
+
+        while let Some(block_idx) = queue.pop_front() {
+            if !emit_order.insert(block_idx) {
+                continue;
+            }
+            match body.basic_blocks[block_idx.0].terminator {
+                Terminator::Call { target, .. }
+                | Terminator::Goto { target } => queue.push_back(target),
+                Terminator::SwitchBool { true_dst, false_dst, .. } => {
+                    queue.push_back(true_dst);
+                    queue.push_back(false_dst);
+                }
+                Terminator::SwitchCmp {
+                    less_dst,
+                    equal_dst,
+                    greater_dst,
+                    ..
+                } => {
+                    queue.push_back(less_dst);
+                    queue.push_back(equal_dst);
+                    queue.push_back(greater_dst);
+                }
+                Terminator::Return => {}
+                Terminator::Unreachable => {}
+                Terminator::Error => {}
+            }
+        }
+
+        emit_order.into_iter().collect()
     };
 
-    // // Function epilogue
-    // todo!();
+    // Function epilogue
+    let emit_return = |buffer: &mut String| -> fmt::Result {
+        use fmt::Write;
+        if !is_leaf {
+            writeln!(buffer, "lw ra, {}(sp)", return_address_offset)?;
+        }
+        if let stack_size @ 1.. = stack_layout.size() {
+            writeln!(buffer, "addi sp, sp, {}", stack_size)?;
+        }
+        writeln!(buffer, "ret")
+    };
 
-    // let mut basic_block_labels: HashMap<usize, String> = HashMap::new();
-    // let mut emitted_basic_blocks: HashSet<usize> = HashSet::new();
-    // let mut basic_blocks_to_emit: VecDeque<usize> = VecDeque::from([0]);
+    let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
+    macro_rules! basic_block_label {
+        ($block_idx:expr) => {
+            basic_block_labels
+                .entry($block_idx)
+                .or_insert_with(&mut *new_local_symbol)
+        };
+    }
+    let mut emitted_basic_blocks: HashSet<BasicBlockIdx> = HashSet::new();
 
-    // while let Some(block_idx) = basic_blocks_to_emit.pop_front() {
-    //     if !emitted_basic_blocks.insert(block_idx) {
-    //         continue;
-    //     }
-    //     let label = basic_block_labels
-    //         .entry(block_idx)
-    //         .or_insert_with(new_local_symbol);
-    //     writeln!(buffer, "{label}:")?;
-    //     let block = &body.basic_blocks[block_idx];
-    //     for op in &block.operations {
-    //         let BasicOperation::Assign(place, value) = op else {
-    //             continue;
-    //         };
-    //         todo!()
-    //     }
-    //     todo!()
-    // }
+    for (idx, block_idx) in basic_block_order.iter().copied().enumerate() {
+        if !emitted_basic_blocks.insert(block_idx) {
+            continue;
+        }
+        let label = basic_block_label!(block_idx);
+        writeln!(buffer, "{label}:")?;
+        let block = &body.basic_blocks[block_idx.0];
+        for op in &block.operations {
+            let BasicOperation::Assign(place, value) = op else {
+                continue;
+            };
+            todo!()
+        }
 
-    todo!("draw the rest of the owl");
+        match block.terminator {
+            Terminator::Goto { target } => {
+                if basic_block_order
+                    .get(idx + 1)
+                    .is_none_or(|next_basic_block| *next_basic_block != target)
+                {
+                    writeln!(buffer, "j {}", basic_block_label!(target))?;
+                }
+            }
+            Terminator::Return => emit_return(buffer)?,
+            Terminator::SwitchBool { scrutinee, true_dst, false_dst } => {
+                todo!()
+            }
+            Terminator::SwitchCmp {
+                lhs,
+                rhs,
+                less_dst,
+                equal_dst,
+                greater_dst,
+            } => todo!(),
+            Terminator::Unreachable => todo!(),
+            Terminator::Call {
+                ref func,
+                ref args,
+                ref return_destination,
+                target,
+            } => {
+                todo!()
+            }
+            Terminator::Error => todo!(),
+        }
+    }
 
-    todo!()
+    writeln!(buffer, ".cfi_endproc")?;
+    writeln!(buffer, ".size {name}, .-{name}")
 }
 
 impl CompilationUnit {
@@ -229,7 +308,11 @@ impl CompilationUnit {
             }
             TypeKind::Bool => Layout::new::<bool>(),
             TypeKind::Never => Layout::new::<()>(),
-            TypeKind::Tuple(_) => todo!(),
+            TypeKind::Tuple(ref fields) => {
+                fields.iter().fold(Layout::new::<()>(), |layout, &field| {
+                    layout.extend(self.layout(field, state)).unwrap().0
+                })
+            }
             TypeKind::Slice { .. } => unimplemented!("slice types"),
             TypeKind::Function { .. } => {
                 unimplemented!("function pointers")
