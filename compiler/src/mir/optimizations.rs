@@ -352,7 +352,7 @@ impl MirOptimization for TrimUnreachableBlocks {
 /// changed between the init and usage.
 ///
 /// Note that this does *not* remove the original write to the slot. If it is
-/// truly unused, it will be removed later by [`DeadStoreElimination`].
+/// truly unused, it will be removed later by [`DeadLocalWriteElimination`].
 ///
 /// TODO: expand this to handle the control-flow graph for inter-block
 /// optimization, or maybe make a separate opt that does that.
@@ -414,13 +414,37 @@ fn replace_copy_in_operand(
     operand: &mut Operand, slot: SlotIdx, new_operand: &Operand,
 ) -> bool {
     match operand {
+        // Replace the whole operand for a local place mention
         Operand::Copy(place)
             if place.local == slot && place.projections.is_empty() =>
         {
             *operand = new_operand.clone();
             true
         }
-        Operand::Copy(..) => false,
+        // Replace the index and the local in a projected place mention, if the
+        // operand is a copy of a local.
+        Operand::Copy(place) => {
+            let Operand::Copy(new_operand) = new_operand else {
+                return false;
+            };
+            if !new_operand.projections.is_empty() {
+                return false;
+            }
+            let mut changed = false;
+            if place.local == slot {
+                place.local = new_operand.local;
+            }
+            for proj in &mut place.projections {
+                let PlaceProjection::DerefIndex(index_slot) = proj else {
+                    continue;
+                };
+                if *index_slot == slot && new_operand.projections.is_empty() {
+                    *index_slot = new_operand.local;
+                    changed |= true;
+                }
+            }
+            changed
+        }
         Operand::Constant(..) => false,
     }
 }
@@ -620,8 +644,9 @@ fn find_reads_in_place_read(slots: &mut [bool], place: &Place) {
     slots[place.local.0] = true;
     for projection in &place.projections {
         match projection {
-            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
-            PlaceProjection::Index(idx) => slots[idx.0] = true,
+            PlaceProjection::DerefConstantIndex(..)
+            | PlaceProjection::Deref => {}
+            PlaceProjection::DerefIndex(idx) => slots[idx.0] = true,
         }
     }
 }
@@ -631,13 +656,13 @@ fn find_reads_in_place_read(slots: &mut [bool], place: &Place) {
 fn find_reads_in_place_write(slots: &mut [bool], place: &Place) {
     for projection in &place.projections {
         match projection {
-            PlaceProjection::ConstantIndex(..) => {}
+            PlaceProjection::DerefConstantIndex(..) => {}
             PlaceProjection::Deref => {
                 // If this is a deref place, then it's not actually
                 // writing to the place's local, it's *reading* it.
                 slots[place.local.0] = true;
             }
-            PlaceProjection::Index(idx) => slots[idx.0] = true,
+            PlaceProjection::DerefIndex(idx) => slots[idx.0] = true,
         }
     }
 }
@@ -767,8 +792,9 @@ fn find_slot_uses_in_place(slots: &mut [bool], place: &Place) {
     slots[place.local.0] = true;
     for projection in &place.projections {
         match projection {
-            PlaceProjection::Index(slot) => slots[slot.0] = true,
-            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
+            PlaceProjection::DerefIndex(slot) => slots[slot.0] = true,
+            PlaceProjection::DerefConstantIndex(..)
+            | PlaceProjection::Deref => {}
         }
     }
 }
@@ -860,8 +886,9 @@ fn replace_slot_uses_in_place(
     let mut changed = replace_slot(slots, &mut place.local);
     for projection in &mut place.projections {
         match projection {
-            PlaceProjection::ConstantIndex(..) | PlaceProjection::Deref => {}
-            PlaceProjection::Index(slot) => {
+            PlaceProjection::DerefConstantIndex(..)
+            | PlaceProjection::Deref => {}
+            PlaceProjection::DerefIndex(slot) => {
                 changed |= replace_slot(slots, slot);
             }
         }

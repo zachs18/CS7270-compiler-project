@@ -1417,8 +1417,8 @@ fn lower_value_expression(
 
             match base_tykind {
                 TypeKind::Pointer { mutability, pointee } => {
-                    // Evaluate pointer into new slot, then add index, then
-                    // deref pointer
+                    // Evaluate pointer into new slot, then evalute index into
+                    // new slot, then Index into pointer
                     let ptr_slot = body.new_slot(base_ty);
                     let initial_block = lower_value_expression(
                         base,
@@ -1446,25 +1446,15 @@ fn lower_value_expression(
                         vec![],
                         Terminator::Goto { target: index_initial_block },
                     );
-                    let ops = vec![
-                        BasicOperation::Assign(
-                            Place::from(ptr_slot),
-                            Value::BinaryOp(
-                                BinaryOp::Arithmetic(
-                                    crate::ast::ArithmeticOp::Add,
-                                ),
-                                Operand::Copy(Place::from(ptr_slot)),
-                                Operand::Copy(Place::from(index_slot)),
-                            ),
-                        ),
-                        BasicOperation::Assign(
-                            Place::from(dst_slot),
-                            Value::Operand(Operand::Copy(Place {
-                                local: ptr_slot,
-                                projections: vec![PlaceProjection::Deref],
-                            })),
-                        ),
-                    ];
+                    let ops = vec![BasicOperation::Assign(
+                        Place::from(dst_slot),
+                        Value::Operand(Operand::Copy(Place {
+                            local: ptr_slot,
+                            projections: vec![PlaceProjection::DerefIndex(
+                                index_slot,
+                            )],
+                        })),
+                    )];
                     after_index_block.update(
                         body,
                         ops,
@@ -1752,8 +1742,8 @@ fn lower_assignment_expression(
 
             match base_tykind {
                 TypeKind::Pointer { .. } => {
-                    // Evaluate pointer into new slot, then add index, then
-                    // write into deref'd pointer
+                    // Evaluate pointer into new slot, then evaluate index, then
+                    // write into indexed pointer
                     let after_base_before_index_block = body.temp_block();
                     let ptr_slot = body.new_slot(base_ty);
                     let base_initial_block = lower_value_expression(
@@ -1787,27 +1777,17 @@ fn lower_assignment_expression(
                         vec![],
                         Terminator::Goto { target: index_initial_block },
                     );
-                    let ops = vec![
-                        BasicOperation::Assign(
-                            Place::from(ptr_slot),
-                            Value::BinaryOp(
-                                BinaryOp::Arithmetic(
-                                    crate::ast::ArithmeticOp::Add,
-                                ),
-                                Operand::Copy(Place::from(ptr_slot)),
-                                Operand::Copy(Place::from(index_slot)),
-                            ),
-                        ),
-                        BasicOperation::Assign(
-                            Place {
-                                local: ptr_slot,
-                                projections: vec![PlaceProjection::Deref],
-                            },
-                            Value::Operand(Operand::Copy(Place::from(
-                                intermediate_slot,
-                            ))),
-                        ),
-                    ];
+                    let ops = vec![BasicOperation::Assign(
+                        Place {
+                            local: ptr_slot,
+                            projections: vec![PlaceProjection::DerefIndex(
+                                index_slot,
+                            )],
+                        },
+                        Value::Operand(Operand::Copy(Place::from(
+                            intermediate_slot,
+                        ))),
+                    )];
                     after_index_block.update(
                         body,
                         ops,
@@ -2021,28 +2001,20 @@ struct Place {
 
 impl fmt::Display for Place {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use std::fmt::Write;
         let mut place = format!("_{}", self.local.0);
-        let mut postfix_needs_parens = false;
         for projection in &self.projections {
-            match (projection, postfix_needs_parens) {
-                (PlaceProjection::ConstantIndex(idx), false) => {
-                    write!(place, ".{idx}")?;
+            match projection {
+                PlaceProjection::DerefConstantIndex(idx @ 0..) => {
+                    place = format!("*({place} + {idx})");
                 }
-                (PlaceProjection::ConstantIndex(idx), true) => {
-                    place = format!("({place}).{idx}");
-                    postfix_needs_parens = false;
+                PlaceProjection::DerefConstantIndex(idx @ ..=-1) => {
+                    place = format!("*({place} - {})", idx.unsigned_abs());
                 }
-                (PlaceProjection::Index(idx), false) => {
-                    write!(place, "[_{}]", idx.0)?;
+                PlaceProjection::DerefIndex(idx) => {
+                    place = format!("*({place} + _{})", idx.0);
                 }
-                (PlaceProjection::Index(idx), true) => {
-                    place = format!("({place})[_{}]", idx.0);
-                    postfix_needs_parens = false;
-                }
-                (PlaceProjection::Deref, _) => {
-                    place = format!("(*{place})");
-                    postfix_needs_parens = true;
+                PlaceProjection::Deref => {
+                    place = format!("*{place}");
                 }
             }
         }
@@ -2058,12 +2030,11 @@ impl From<SlotIdx> for Place {
 
 #[derive(Debug, Clone)]
 enum PlaceProjection {
-    /// Used for arrays and tuples (pointer indexing is lowered to addition and
-    /// deref)
-    ConstantIndex(usize),
-    /// Used for arrays (pointer indexing is lowered to addition and deref,
-    /// tuples cannot be runtime-indexed)
-    Index(SlotIdx),
+    /// Used for pointer indexing by a constant
+    DerefConstantIndex(isize),
+    /// Used for pointer indexing by a value
+    DerefIndex(SlotIdx),
+    /// Equivalent to DerefConstantIndex(0)
     Deref,
 }
 
