@@ -452,7 +452,7 @@ fn replace_copy_in_operand(
 /// Replace `Copy(slot)` with `new_operand` anywhere it occurs. If this op is a
 /// write to `src_local`, return a conflict.
 ///
-/// Returns whether a change was made, and whether a conflict was made.
+/// Returns whether a change was made, and whether a conflict was detected.
 fn replace_copy_in_operation(
     op: &mut BasicOperation, slot: SlotIdx, new_operand: &Operand,
     src_local: Option<SlotIdx>,
@@ -460,15 +460,26 @@ fn replace_copy_in_operation(
     match op {
         BasicOperation::Nop => (false, false),
         BasicOperation::Assign(place, value) => {
-            // NOTE: This is conservative; If `place.projections` contains a
-            // `Deref`, then this assignment doesn't actually conflict.
-            let conflict =
-                src_local.is_some_and(|src_local| src_local == place.local);
+            let conflict = src_local
+                .is_some_and(|src_local| src_local == place.local)
+                && place.projections.is_empty();
             let mut changed = false;
 
-            // TODO: do the opt in place projections
-            #[cfg(any())]
-            for projection in &mut place.projections {}
+            'projections: for projection in &mut place.projections {
+                let PlaceProjection::DerefIndex(index_slot) = projection else {
+                    continue;
+                };
+                let Operand::Copy(new_operand) = new_operand else {
+                    break 'projections;
+                };
+                if !new_operand.projections.is_empty() {
+                    break 'projections;
+                }
+                if *index_slot == slot && new_operand.projections.is_empty() {
+                    *index_slot = new_operand.local;
+                    changed |= true;
+                }
+            }
 
             changed |= replace_copy_in_value(value, slot, new_operand);
 
