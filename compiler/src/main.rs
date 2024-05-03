@@ -101,6 +101,7 @@ fn main() -> ExitCode {
         changed |= apply_optimization!(RedundantCopyEliminiation);
         changed |= apply_optimization!(DeadLocalWriteElimination);
         changed |= apply_optimization!(TrimUnusedSlots);
+        changed |= apply_optimization!(ConstantPropagation);
         if !changed {
             break;
         }

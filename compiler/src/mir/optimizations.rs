@@ -2,13 +2,18 @@
 //!
 //! * Combining blocks
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    ops::ControlFlow,
+};
 
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
+use crate::ast::{ArithmeticOp, BinaryOp};
+
 use super::{
-    BasicBlock, BasicBlockIdx, BasicOperation, Body, Operand, Place,
+    BasicBlock, BasicBlockIdx, BasicOperation, Body, Constant, Operand, Place,
     PlaceProjection, SlotIdx, Terminator, Value,
 };
 
@@ -227,7 +232,7 @@ pub struct TrimUnreachableBlocks;
 fn find_reachable_blocks_from(
     body: &Body, from: impl IntoIterator<Item = BasicBlockIdx>,
 ) -> Vec<bool> {
-    let mut from = from.into_iter();
+    let from = from.into_iter();
     let mut reachable = vec![false; body.basic_blocks.len()];
     let mut frontier: VecDeque<BasicBlockIdx> =
         VecDeque::with_capacity(from.size_hint().0);
@@ -957,5 +962,144 @@ impl MirOptimization for TrimUnusedSlots {
         }
 
         true
+    }
+}
+
+/// MIR optimization that propagates constant values in operations.
+///
+/// Examples:
+/// ```text
+/// // Before:
+/// bb0 {
+///     _0 = Add(Copy(_1), const 0);
+///     return
+/// }
+/// // After
+/// bb0 {
+///     _0 = Copy(_1);
+///     return
+/// }
+/// ```
+/// ```text
+/// // Before:
+/// bb0 {
+///     _0 = Add(const 2, const 3);
+///     return
+/// }
+/// // After
+/// bb0 {
+///     _0 = const 5;
+///     return
+/// }
+/// ```
+pub struct ConstantPropagation;
+
+fn constant_propagate_value(value: &mut Value) -> bool {
+    macro_rules! make_ops {
+        ($($op:pat => $($u128_method:ident)? $(|$lhs:ident, $rhs:ident| $value:expr)?;)*) => {
+            match value {
+                $(
+                    &mut Value::BinaryOp(
+                        $op,
+                        Operand::Constant(Constant::Integer(lhs)),
+                        Operand::Constant(Constant::Integer(rhs)),
+                    ) => {
+                        $(
+                            *value = Value::Operand(Operand::Constant(Constant::Integer(
+                                u128::$u128_method(lhs, rhs),
+                            )));
+                        )?
+                        $(
+                            *value = Value::Operand(Operand::Constant(Constant::Integer(
+                                {
+                                    let $lhs = lhs;
+                                    let $rhs = rhs;
+                                    $value
+                                },
+                            )));
+                        )?
+                        true
+                    },
+                )*
+                // x + 0 or x - 0 or 0 + x => x
+                Value::BinaryOp(
+                    BinaryOp::Arithmetic(ArithmeticOp::Add) | BinaryOp::Arithmetic(ArithmeticOp::Subtract),
+                    other,
+                    Operand::Constant(Constant::Integer(0)),
+                ) | Value::BinaryOp(
+                    BinaryOp::Arithmetic(ArithmeticOp::Add),
+                    Operand::Constant(Constant::Integer(0)),
+                    other,
+                ) => {
+                    *value = Value::Operand(other.clone());
+                    true
+                }
+                Value::Operand(_) => false,
+                Value::BinaryOp(_, _, _) => false,
+                Value::Negate(inner) => {
+                    let inner_changed = constant_propagate_value(inner);
+                    match **inner {
+                        Value::Operand(Operand::Constant(Constant::Integer(inner))) => {
+                            *value = Value::from(Constant::Integer(u128::wrapping_neg(inner)));
+                            true
+                        }
+                        Value::Negate(ref inner) => {
+                            *value = (**inner).clone();
+                            true
+                        }
+                        _ => inner_changed
+                    }
+                }
+                Value::Not(inner) => {
+                    let inner_changed = constant_propagate_value(inner);
+                    match **inner {
+                        Value::Operand(Operand::Constant(Constant::Integer(inner))) => {
+                            *value = Value::from(Constant::Integer(!inner));
+                            true
+                        }
+                        Value::Operand(Operand::Constant(Constant::Bool(inner))) => {
+                            *value = Value::from(Constant::Bool(!inner));
+                            true
+                        }
+                        Value::Not(ref inner) => {
+                            *value = (**inner).clone();
+                            true
+                        }
+                        _ => inner_changed
+                    }
+                }
+            }
+        };
+    }
+    make_ops! {
+        BinaryOp::Arithmetic(ArithmeticOp::Add) => wrapping_add;
+        BinaryOp::Arithmetic(ArithmeticOp::Subtract) => wrapping_sub;
+        BinaryOp::Arithmetic(ArithmeticOp::Multiply) => wrapping_mul;
+        // TODO: division and modulo require knowing signedness
+        // BinaryOp::Arithmetic(ArithmeticOp::Divide) => |lhs, rhs| match u128::checked_div(lhs, rhs) {
+        //     Some(value) => value,
+        //     None => return false, // Don't attempt to optimize divisions by zero
+        // };
+        // BinaryOp::Arithmetic(ArithmeticOp::Modulo) => |lhs, rhs| match u128::checked_mod(lhs, rhs) {
+        //     Some(value) => value,
+        //     None => return false, // Don't attempt to optimize divisions by zero
+        // };
+    }
+}
+
+impl MirOptimization for ConstantPropagation {
+    fn apply(&self, body: &mut Body) -> bool {
+        let mut changed = false;
+        for block in &mut body.basic_blocks {
+            for op in &mut block.operations {
+                match op {
+                    BasicOperation::Nop => {}
+                    BasicOperation::Assign(_place, value) => {
+                        changed |= constant_propagate_value(value);
+                    }
+                }
+            }
+        }
+        changed
     }
 }

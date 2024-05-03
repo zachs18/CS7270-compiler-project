@@ -2091,6 +2091,18 @@ enum Value {
     Negate(Box<Value>),
 }
 
+impl From<Operand> for Value {
+    fn from(value: Operand) -> Self {
+        Value::Operand(value)
+    }
+}
+
+impl From<Constant> for Value {
+    fn from(value: Constant) -> Self {
+        Value::Operand(Operand::Constant(value))
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
