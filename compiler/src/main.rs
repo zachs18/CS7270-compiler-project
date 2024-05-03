@@ -78,14 +78,15 @@ fn main() -> ExitCode {
     let mut mir = mir::lower_hir_to_mir(&hir, &hir_ctx);
 
     macro_rules! apply_optimization {
-        ($opt_name:ident) => {
-            mir.apply_optimization(mir::optimizations::$opt_name);
+        ($opt_name:ident) => {{
+            let changed = mir.apply_optimization(mir::optimizations::$opt_name);
 
             println!("post-{}:", stringify!($opt_name));
             println!("{mir}");
 
             println!();
-        };
+            changed
+        }};
     }
 
     println!("pre-opt: ");
@@ -95,9 +96,15 @@ fn main() -> ExitCode {
 
     apply_optimization!(CombineBlocks);
     apply_optimization!(TrimUnreachableBlocks);
-    apply_optimization!(RedundantCopyEliminiation);
-    apply_optimization!(DeadLocalWriteElimination);
-    apply_optimization!(TrimUnusedSlots);
+    loop {
+        let mut changed = false;
+        changed |= apply_optimization!(RedundantCopyEliminiation);
+        changed |= apply_optimization!(DeadLocalWriteElimination);
+        changed |= apply_optimization!(TrimUnusedSlots);
+        if !changed {
+            break;
+        }
+    }
 
     let state = CompilationState::new(ISA::RV32I, ABI::ILP32)
         .expect("valid arch/abi combination");
