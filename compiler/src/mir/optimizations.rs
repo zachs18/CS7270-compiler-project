@@ -1127,3 +1127,30 @@ impl MirOptimization for ConstantPropagation {
         changed
     }
 }
+
+/// Reduce a BinaryOp comparison assignment to a local followed immediately by a
+/// switchBool terminator on that local to an equvalent switchCmp terminator.
+///
+/// Note: Does not remove the comparison op/assignment, as the local may be used
+/// later.
+///
+/// Example:
+/// ```text
+/// // Before
+/// bb0 {
+///     _1 = LessEq(_3, _4);
+///     switchBool(_1) [false -> bb1, true -> bb2]
+/// }
+/// // After
+/// bb0 {
+///     _1 = LessEq(_3, _4);
+///     switchCmp(_3, _4) [Less -> bb2, Equal -> bb2, Greater -> bb1]
+/// }
+/// ```
+pub struct InsertSwitchCompare;
+
+impl MirOptimization for InsertSwitchCompare {
+    fn apply(&self, body: &mut Body) -> bool {
+        todo!()
+    }
+}
