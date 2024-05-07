@@ -17,7 +17,8 @@ use zachs18_stdx::OptionExt;
 use crate::{
     hir::PointerSized,
     mir::{
-        BasicBlockIdx, BasicOperation, CompilationUnit, ItemKind, Terminator,
+        BasicBlockIdx, BasicOperation, CompilationUnit, ItemKind, SlotIdx,
+        Terminator,
     },
 };
 
@@ -220,6 +221,34 @@ fn emit_function(
         }
         writeln!(buffer, "ret")
     };
+
+    // Load local slot into register (should be a temporary register)
+    let emit_load_local =
+        |buffer: &mut String, local: SlotIdx, dst: &str| -> fmt::Result {
+            use fmt::Write;
+            let load_instruction = match &compilation_unit.types
+                [body.slots[local.0].0]
+            {
+                TypeKind::Pointer { .. }
+                | TypeKind::Integer {
+                    bits: Either::Right(PointerSized), ..
+                } => "lw",
+                TypeKind::Integer { signed, bits: Either::Left(bits) } => {
+                    match (signed, bits) {
+                        (_, 32) => "lw",
+                        (false, 16) => "lhu",
+                        (true, 16) => "lh",
+                        (false, 8) => "lbu",
+                        (true, 8) => "lb",
+                        _ => unimplemented!("loading {bits}-bit integers"),
+                    }
+                }
+                TypeKind::Bool => "lbu",
+                ty => unimplemented!("loading {ty:?}"),
+            };
+            let offset = slot_locations[local.0];
+            writeln!(buffer, "{load_instruction} {dst}, {offset}(sp)")
+        };
 
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
