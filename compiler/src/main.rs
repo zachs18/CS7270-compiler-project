@@ -109,7 +109,7 @@ fn main() -> ExitCode {
         }
     }
 
-    let state = CompilationState::new(ISA::RV32I, ABI::ILP32)
+    let state = CompilationState::new(ISA::RV64I, ABI::LP64)
         .expect("valid arch/abi combination");
 
     let asm = mir.compile(state);

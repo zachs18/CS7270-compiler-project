@@ -17,8 +17,8 @@ use zachs18_stdx::OptionExt;
 use crate::{
     hir::PointerSized,
     mir::{
-        BasicBlockIdx, BasicOperation, CompilationUnit, ItemKind, SlotIdx,
-        Terminator,
+        BasicBlockIdx, BasicOperation, CompilationUnit, Constant, ItemKind,
+        Operand, Place, SlotIdx, Terminator, Value,
     },
 };
 
@@ -131,10 +131,8 @@ fn emit_function(
     writeln!(buffer, ".cfi_startproc")?;
     eprintln!("TODO: CFI directives");
 
-    assert!(
-        matches!(state.abi, ABI::ILP32 | ABI::ILP32F | ABI::ILP32D),
-        "64-bit not supported"
-    );
+    let [pointer_load_inst, pointer_store_inst] =
+        compilation_unit.pointer_load_store_instructions(state);
 
     // See if this function is a leaf
     let is_leaf = !body
@@ -160,13 +158,35 @@ fn emit_function(
     // 2. If not leaf, write return address
     // 3. Copy arguments into stack
     if let stack_size @ 1.. = stack_layout.size() {
-        writeln!(buffer, "subi sp, sp, {}", stack_size)?;
+        writeln!(buffer, "addi sp, sp, -{}", stack_size)?;
     }
     if !is_leaf {
-        writeln!(buffer, "sw ra, {}(sp)", return_address_offset)?;
+        writeln!(
+            buffer,
+            "{pointer_store_inst} ra, {}(sp)",
+            return_address_offset
+        )?;
     }
-    for arg in 0..body.argc {
-        todo!("copy arguments to stack");
+
+    let mut arg_registers_used = 0;
+    let mut next_arg_register = || {
+        if arg_registers_used >= 8 {
+            unimplemented!("more than 8 function arguments");
+        }
+        let argreg = arg_registers_used;
+        arg_registers_used += 1;
+        format!("a{argreg}")
+    };
+
+    for arg in 1..=body.argc {
+        let Some([_load_inst, store_inst]) =
+            compilation_unit.load_store_instructions(body.slots[arg], state)
+        else {
+            continue;
+        };
+        let reg = next_arg_register();
+        let offset = slot_locations[arg];
+        writeln!(buffer, "{store_inst} {reg}, {offset}(sp)")?;
     }
 
     // Determine the order to emit basic blocks.
@@ -214,7 +234,17 @@ fn emit_function(
     let emit_return = |buffer: &mut String| -> fmt::Result {
         use fmt::Write;
         if !is_leaf {
-            writeln!(buffer, "lw ra, {}(sp)", return_address_offset)?;
+            writeln!(
+                buffer,
+                "{pointer_load_inst} ra, {}(sp)",
+                return_address_offset
+            )?;
+        }
+        if let Some([load_inst, _store_inst]) =
+            compilation_unit.load_store_instructions(body.slots[0], state)
+        {
+            let offset = slot_locations[0];
+            writeln!(buffer, "{load_inst} a0, {offset}(sp)")?;
         }
         if let stack_size @ 1.. = stack_layout.size() {
             writeln!(buffer, "addi sp, sp, {}", stack_size)?;
@@ -226,29 +256,65 @@ fn emit_function(
     let emit_load_local =
         |buffer: &mut String, local: SlotIdx, dst: &str| -> fmt::Result {
             use fmt::Write;
-            let load_instruction = match &compilation_unit.types
-                [body.slots[local.0].0]
-            {
-                TypeKind::Pointer { .. }
-                | TypeKind::Integer {
-                    bits: Either::Right(PointerSized), ..
-                } => "lw",
-                TypeKind::Integer { signed, bits: Either::Left(bits) } => {
-                    match (signed, bits) {
-                        (_, 32) => "lw",
-                        (false, 16) => "lhu",
-                        (true, 16) => "lh",
-                        (false, 8) => "lbu",
-                        (true, 8) => "lb",
-                        _ => unimplemented!("loading {bits}-bit integers"),
-                    }
-                }
-                TypeKind::Bool => "lbu",
-                ty => unimplemented!("loading {ty:?}"),
+            let Some([load_inst, _store_inst]) = compilation_unit
+                .load_store_instructions(body.slots[local.0], state)
+            else {
+                return Ok(());
             };
             let offset = slot_locations[local.0];
-            writeln!(buffer, "{load_instruction} {dst}, {offset}(sp)")
+            writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
         };
+
+    // Store register into local slot (register should be a temporary register)
+    let emit_load_local =
+        |buffer: &mut String, local: SlotIdx, src: &str| -> fmt::Result {
+            use fmt::Write;
+            let Some([_load_inst, store_inst]) = compilation_unit
+                .load_store_instructions(body.slots[local.0], state)
+            else {
+                return Ok(());
+            };
+            let offset = slot_locations[local.0];
+            writeln!(buffer, "{store_inst} {src}, {offset}(sp)")
+        };
+
+    let emit_evaluate_value = |buffer: &mut String,
+                               value: &Value,
+                               dst: &str|
+     -> fmt::Result {
+        match *value {
+            Value::Operand(Operand::Constant(Constant::Bool(value))) => {
+                writeln!(buffer, "li {dst}, {}", value as u8)
+            }
+            Value::Operand(Operand::Constant(Constant::Integer(value))) => {
+                writeln!(buffer, "li {dst}, {}", value as i64)
+            }
+            Value::Operand(Operand::Constant(Constant::ItemAddress(item))) => {
+                todo!()
+            }
+            Value::Operand(Operand::Copy(Place {
+                local,
+                projection: None,
+            })) => {
+                let Some([load_inst, _]) = compilation_unit
+                    .load_store_instructions(body.slots[local.0], state)
+                else {
+                    return Ok(());
+                };
+                let offset = slot_locations[local.0];
+                writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
+            }
+
+            Value::Operand(Operand::Copy(Place {
+                local,
+                projection: Some(ref projection),
+            })) => todo!(),
+            Value::Operand(Operand::Constant(Constant::Tuple(_))) => todo!(),
+            Value::BinaryOp(_, _, _) => todo!(),
+            Value::Not(_) => todo!(),
+            Value::Negate(_) => todo!(),
+        }
+    };
 
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
@@ -271,7 +337,26 @@ fn emit_function(
             let BasicOperation::Assign(place, value) = op else {
                 continue;
             };
-            todo!()
+
+            // Load value into t0
+            emit_evaluate_value(buffer, value, "t0")?;
+
+            // Write value into place
+            match place.projection {
+                None => {
+                    let Some([_, store_inst]) = compilation_unit
+                        .load_store_instructions(
+                            body.slots[place.local.0],
+                            state,
+                        )
+                    else {
+                        return Ok(());
+                    };
+                    let offset = slot_locations[place.local.0];
+                    writeln!(buffer, "{store_inst} t0, {offset}(sp)")?;
+                }
+                Some(_) => todo!(),
+            }
         }
 
         match block.terminator {
@@ -338,6 +423,48 @@ impl CompilationUnit {
         }
     }
 
+    fn pointer_load_store_instructions(
+        &self, state: &CompilationState,
+    ) -> [&'static str; 2] {
+        match state.abi {
+            ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => ["lw", "sw"],
+            ABI::LP64 | ABI::LP64F | ABI::LP64D => ["ld", "sd"],
+        }
+    }
+
+    fn load_store_instructions(
+        &self, ty: TypeIdx, state: &CompilationState,
+    ) -> Option<[&'static str; 2]> {
+        let (pointer_sized_suffix, pointer_bits) = match state.abi {
+            ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => (["lw", "sw"], 32),
+            ABI::LP64 | ABI::LP64F | ABI::LP64D => (["ld", "sd"], 64),
+        };
+        Some(match self.types[ty.0] {
+            TypeKind::Integer { bits: Either::Right(PointerSized), .. }
+            | TypeKind::Pointer { .. } => pointer_sized_suffix,
+            TypeKind::Integer { bits: Either::Left(bits), signed } => {
+                match (signed, bits, pointer_bits) {
+                    (_, 64, 64) => ["ld", "sd"],
+                    (_, 32, 32) | (true, 32, _) => ["lw", "sw"],
+                    (false, 32, _) => ["lwu", "swu"],
+                    (true, 16, _) => ["lh", "sh"],
+                    (false, 16, _) => ["lhu", "shu"],
+                    (true, 8, _) => ["lb", "sb"],
+                    (false, 8, _) => ["lbu", "sbu"],
+                    (true, _, _) => {
+                        unimplemented!("loading i{bits} on RV{pointer_bits}")
+                    }
+                    (false, _, _) => {
+                        unimplemented!("loading u{bits} on RV{pointer_bits}")
+                    }
+                }
+            }
+            TypeKind::Bool => ["lbu", "sbu"],
+            TypeKind::Tuple(ref fields) if fields.len() == 0 => return None,
+            ref ty => unimplemented!("loading {ty:?}"),
+        })
+    }
+
     /// Returns the Layout required by the stack, and the offsets of all local
     /// slots
     fn body_stack_layout(
@@ -354,11 +481,6 @@ impl CompilationUnit {
     }
 
     pub fn compile(&self, state: CompilationState) -> String {
-        let is_64 = match state.abi {
-            ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => false,
-            ABI::LP64 | ABI::LP64F | ABI::LP64D => true,
-        };
-
         let mut buffer = String::new();
 
         let mut local_symbols: HashMap<usize, String> = HashMap::new();
