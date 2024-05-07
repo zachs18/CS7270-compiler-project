@@ -1154,3 +1154,52 @@ impl MirOptimization for InsertSwitchCompare {
         todo!()
     }
 }
+
+/// Find `SwtichBool` and `SwitchCmp` terminators with only a single target, and
+/// replace them with `Goto` terminators.
+///
+/// Example:
+/// ```text
+/// // Before
+/// bb0 {
+///     _1 = And(_3, _4);
+///     switchBool(_1) [false -> bb1, true -> bb1]
+/// }
+/// // After
+/// bb0 {
+///     _1 = And(_3, _4);
+///     goto -> bb1
+/// }
+/// ```
+pub struct RedundantSwitchElimination;
+
+impl MirOptimization for RedundantSwitchElimination {
+    fn apply(&self, body: &mut Body) -> bool {
+        let mut changed = false;
+        for block in &mut body.basic_blocks {
+            match block.terminator {
+                Terminator::SwitchBool { true_dst, false_dst, .. } => {
+                    if true_dst == false_dst {
+                        block.terminator =
+                            Terminator::Goto { target: true_dst };
+                        changed = true;
+                    }
+                }
+                Terminator::SwitchCmp {
+                    less_dst,
+                    equal_dst,
+                    greater_dst,
+                    ..
+                } => {
+                    if less_dst == equal_dst && equal_dst == greater_dst {
+                        block.terminator =
+                            Terminator::Goto { target: less_dst };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+}
