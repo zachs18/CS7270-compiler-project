@@ -416,7 +416,7 @@ fn replace_copy_in_operand(
     match operand {
         // Replace the whole operand for a local place mention
         Operand::Copy(place)
-            if place.local == slot && place.projections.is_empty() =>
+            if place.local == slot && place.projection.is_none() =>
         {
             *operand = new_operand.clone();
             true
@@ -427,18 +427,17 @@ fn replace_copy_in_operand(
             let Operand::Copy(new_operand) = new_operand else {
                 return false;
             };
-            if !new_operand.projections.is_empty() {
+            if new_operand.projection.is_some() {
                 return false;
             }
             let mut changed = false;
             if place.local == slot {
                 place.local = new_operand.local;
             }
-            for proj in &mut place.projections {
-                let PlaceProjection::DerefIndex(index_slot) = proj else {
-                    continue;
-                };
-                if *index_slot == slot && new_operand.projections.is_empty() {
+            if let Some(PlaceProjection::DerefIndex(index_slot)) =
+                &mut place.projection
+            {
+                if *index_slot == slot && new_operand.projection.is_none() {
                     *index_slot = new_operand.local;
                     changed |= true;
                 }
@@ -462,21 +461,19 @@ fn replace_copy_in_operation(
         BasicOperation::Assign(place, value) => {
             let conflict = src_local
                 .is_some_and(|src_local| src_local == place.local)
-                && place.projections.is_empty();
+                && place.projection.is_none();
             let mut changed = false;
 
-            'projections: for projection in &mut place.projections {
-                let PlaceProjection::DerefIndex(index_slot) = projection else {
-                    continue;
-                };
-                let Operand::Copy(new_operand) = new_operand else {
-                    break 'projections;
-                };
-                if !new_operand.projections.is_empty() {
-                    break 'projections;
-                }
-                if *index_slot == slot && new_operand.projections.is_empty() {
-                    *index_slot = new_operand.local;
+            if let (
+                Some(PlaceProjection::DerefIndex(index_slot)),
+                &Operand::Copy(Place {
+                    local: new_operand_local,
+                    projection: None,
+                }),
+            ) = (&mut place.projection, new_operand)
+            {
+                if *index_slot == slot {
+                    *index_slot = new_operand_local;
                     changed |= true;
                 }
             }
@@ -507,7 +504,7 @@ impl MirOptimization for RedundantCopyEliminiation {
                 else {
                     continue;
                 };
-                if !place.projections.is_empty() {
+                if place.projection.is_some() {
                     // We only consider writes to locals directly.
                     // TODO: maybe consider writes to local array/tuple elements
                     // via index projections.
@@ -518,7 +515,7 @@ impl MirOptimization for RedundantCopyEliminiation {
                 // stop if it changes, since that would make the optimization
                 // incorrect.
                 let src_local = match operand {
-                    Operand::Copy(place) if !place.projections.is_empty() => {
+                    Operand::Copy(place) if place.projection.is_some() => {
                         // Conservatively don't deduplicate copies from more
                         // complicated places.
                         continue 'this_block;
@@ -653,27 +650,29 @@ fn find_reads_in_operand_read(slots: &mut [bool], operand: &Operand) {
 /// `slots` to `true`.
 fn find_reads_in_place_read(slots: &mut [bool], place: &Place) {
     slots[place.local.0] = true;
-    for projection in &place.projections {
-        match projection {
-            PlaceProjection::DerefConstantIndex(..)
-            | PlaceProjection::Deref => {}
-            PlaceProjection::DerefIndex(idx) => slots[idx.0] = true,
-        }
+    if let Some(PlaceProjection::DerefIndex(index_slot)) = place.projection {
+        slots[index_slot.0] = true;
     }
 }
 
 /// For each slot that is read when this `Place` is evaluated as the assignee,
 /// set the corresponding element of `slots` to `true`.
 fn find_reads_in_place_write(slots: &mut [bool], place: &Place) {
-    for projection in &place.projections {
-        match projection {
-            PlaceProjection::DerefConstantIndex(..) => {}
-            PlaceProjection::Deref => {
-                // If this is a deref place, then it's not actually
-                // writing to the place's local, it's *reading* it.
-                slots[place.local.0] = true;
-            }
-            PlaceProjection::DerefIndex(idx) => slots[idx.0] = true,
+    match place.projection {
+        None => {}
+        Some(
+            PlaceProjection::DerefConstantIndex(..) | PlaceProjection::Deref,
+        ) => {
+            // If this is a deref place, then it's not actually
+            // writing to the place's local, it's *reading* it.
+            slots[place.local.0] = true;
+        }
+        Some(PlaceProjection::DerefIndex(index_slot)) => {
+            // If this is a deref-index place, then it's not actually
+            // writing to the place's local, it's *reading* it. and also reading
+            // the index slot.
+            slots[place.local.0] = true;
+            slots[index_slot.0] = true
         }
     }
 }
@@ -730,7 +729,7 @@ impl MirOptimization for DeadLocalWriteElimination {
                 BasicOperation::Nop => true,
                 BasicOperation::Assign(place, _) => {
                     let should_remove =
-                        place.projections.is_empty() && !slots[place.local.0];
+                        place.projection.is_none() && !slots[place.local.0];
                     any_removed |= should_remove;
                     !should_remove
                 }
@@ -801,12 +800,8 @@ fn find_slot_uses_in_operand(slots: &mut [bool], operand: &Operand) {
 
 fn find_slot_uses_in_place(slots: &mut [bool], place: &Place) {
     slots[place.local.0] = true;
-    for projection in &place.projections {
-        match projection {
-            PlaceProjection::DerefIndex(slot) => slots[slot.0] = true,
-            PlaceProjection::DerefConstantIndex(..)
-            | PlaceProjection::Deref => {}
-        }
+    if let Some(PlaceProjection::DerefIndex(slot)) = place.projection {
+        slots[slot.0] = true
     }
 }
 
@@ -895,14 +890,8 @@ fn replace_slot_uses_in_place(
     slots: &BTreeMap<SlotIdx, SlotIdx>, place: &mut Place,
 ) -> bool {
     let mut changed = replace_slot(slots, &mut place.local);
-    for projection in &mut place.projections {
-        match projection {
-            PlaceProjection::DerefConstantIndex(..)
-            | PlaceProjection::Deref => {}
-            PlaceProjection::DerefIndex(slot) => {
-                changed |= replace_slot(slots, slot);
-            }
-        }
+    if let Some(PlaceProjection::DerefIndex(slot)) = &mut place.projection {
+        changed |= replace_slot(slots, slot);
     }
     changed
 }

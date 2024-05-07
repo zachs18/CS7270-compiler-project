@@ -1125,9 +1125,9 @@ fn lower_value_expression(
                                         Place::from(dst_slot),
                                         Value::Operand(Operand::Copy(Place {
                                             local: addr_slot,
-                                            projections: vec![
+                                            projection: Some(
                                                 PlaceProjection::Deref,
-                                            ],
+                                            ),
                                         })),
                                     ),
                                 ]
@@ -1226,7 +1226,7 @@ fn lower_value_expression(
                         Place::from(dst_slot),
                         Value::Operand(Operand::Copy(Place {
                             local: operand_slot,
-                            projections: vec![PlaceProjection::Deref],
+                            projection: Some(PlaceProjection::Deref),
                         })),
                     )],
                     Terminator::Goto { target: next_block },
@@ -1450,9 +1450,9 @@ fn lower_value_expression(
                         Place::from(dst_slot),
                         Value::Operand(Operand::Copy(Place {
                             local: ptr_slot,
-                            projections: vec![PlaceProjection::DerefIndex(
+                            projection: Some(PlaceProjection::DerefIndex(
                                 index_slot,
-                            )],
+                            )),
                         })),
                     )];
                     after_index_block.update(
@@ -1704,9 +1704,9 @@ fn lower_assignment_expression(
                                 BasicOperation::Assign(
                                     Place {
                                         local: addr_slot,
-                                        projections: vec![
+                                        projection: Some(
                                             PlaceProjection::Deref,
-                                        ],
+                                        ),
                                     },
                                     Value::Operand(Operand::Copy(Place::from(
                                         intermediate_slot,
@@ -1780,9 +1780,9 @@ fn lower_assignment_expression(
                     let ops = vec![BasicOperation::Assign(
                         Place {
                             local: ptr_slot,
-                            projections: vec![PlaceProjection::DerefIndex(
+                            projection: Some(PlaceProjection::DerefIndex(
                                 index_slot,
-                            )],
+                            )),
                         },
                         Value::Operand(Operand::Copy(Place::from(
                             intermediate_slot,
@@ -1996,13 +1996,13 @@ impl fmt::Display for BasicOperation {
 #[derive(Debug, Clone)]
 struct Place {
     local: SlotIdx,
-    projections: Vec<PlaceProjection>,
+    projection: Option<PlaceProjection>,
 }
 
 impl fmt::Display for Place {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut place = format!("_{}", self.local.0);
-        for projection in &self.projections {
+        if let Some(projection) = &self.projection {
             match projection {
                 PlaceProjection::DerefConstantIndex(idx @ 0..) => {
                     place = format!("*({place} + {idx})");
@@ -2024,7 +2024,7 @@ impl fmt::Display for Place {
 
 impl From<SlotIdx> for Place {
     fn from(value: SlotIdx) -> Self {
-        Self { local: value, projections: vec![] }
+        Self { local: value, projection: None }
     }
 }
 

@@ -56,7 +56,7 @@ impl CompilationUnit {
         const OP_LIMIT: usize = 1_000_000; // arbitrary
 
         fn assert_local_place(place: &Place) -> SlotIdx {
-            if !place.projections.is_empty() {
+            if place.projection.is_some() {
                 panic!("cannot const-eval non-local assignments (yet)");
             }
             place.local
