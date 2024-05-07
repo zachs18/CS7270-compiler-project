@@ -4,10 +4,11 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use either::Either;
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
-use crate::ast::{ArithmeticOp, BinaryOp};
+use crate::ast::{ArithmeticOp, BinaryOp, ComparisonOp};
 
 use super::{
     BasicBlock, BasicBlockIdx, BasicOperation, Body, Constant, Operand, Place,
@@ -698,8 +699,12 @@ impl MirOptimization for DeadLocalWriteElimination {
                     slots[scrutinee.0] = true;
                 }
                 Terminator::SwitchCmp { lhs, rhs, .. } => {
-                    slots[lhs.0] = true;
-                    slots[rhs.0] = true;
+                    if let Either::Left(lhs) = lhs {
+                        slots[lhs.0] = true;
+                    }
+                    if let Either::Left(rhs) = rhs {
+                        slots[rhs.0] = true;
+                    }
                 }
                 Terminator::Return => {
                     // If we reach a return, then `_0` is read.
@@ -826,8 +831,12 @@ fn find_slot_uses_in_terminator(slots: &mut [bool], terminator: &Terminator) {
             slots[scrutinee.0] = true;
         }
         Terminator::SwitchCmp { lhs, rhs, .. } => {
-            slots[lhs.0] = true;
-            slots[rhs.0] = true;
+            if let Either::Left(lhs) = lhs {
+                slots[lhs.0] = true;
+            }
+            if let Either::Left(rhs) = rhs {
+                slots[rhs.0] = true;
+            }
         }
         Terminator::Goto { .. }
         | Terminator::Return
@@ -933,8 +942,12 @@ fn replace_slot_uses_in_terminator(
         }
         Terminator::SwitchCmp { lhs, rhs, .. } => {
             let mut changed = false;
-            changed |= replace_slot(slots, lhs);
-            changed |= replace_slot(slots, rhs);
+            if let Either::Left(lhs) = lhs {
+                changed |= replace_slot(slots, lhs);
+            }
+            if let Either::Left(rhs) = rhs {
+                changed |= replace_slot(slots, rhs);
+            }
             changed
         }
         Terminator::Call { func, args, return_destination, .. } => {
@@ -1138,7 +1151,7 @@ impl MirOptimization for ConstantPropagation {
 /// ```text
 /// // Before
 /// bb0 {
-///     _1 = LessEq(_3, _4);
+///     _1 = LessEq(Copy(_3), Copy(_4));
 ///     switchBool(_1) [false -> bb1, true -> bb2]
 /// }
 /// // After
@@ -1151,7 +1164,57 @@ pub struct InsertSwitchCompare;
 
 impl MirOptimization for InsertSwitchCompare {
     fn apply(&self, body: &mut Body) -> bool {
-        todo!()
+        let mut changed = false;
+        for block in &mut body.basic_blocks {
+            let Terminator::SwitchBool { scrutinee, true_dst, false_dst } =
+                block.terminator
+            else {
+                continue;
+            };
+            let Some(BasicOperation::Assign(place, value)) =
+                block.operations.last()
+            else {
+                continue;
+            };
+            if place.local != scrutinee || place.projection.is_some() {
+                continue;
+            }
+            let Value::BinaryOp(BinaryOp::Comparison(cmp_op), lhs, rhs) = value
+            else {
+                continue;
+            };
+            let lhs = match lhs {
+                &Operand::Copy(Place { local, projection: None }) => {
+                    Either::Left(local)
+                }
+                Operand::Constant(constant) => Either::Right(constant.clone()),
+                _ => continue,
+            };
+            let rhs = match rhs {
+                &Operand::Copy(Place { local, projection: None }) => {
+                    Either::Left(local)
+                }
+                Operand::Constant(constant) => Either::Right(constant.clone()),
+                _ => continue,
+            };
+            let (less_dst, equal_dst, greater_dst) = match cmp_op {
+                ComparisonOp::Equal => (false_dst, true_dst, false_dst),
+                ComparisonOp::NotEqual => (true_dst, false_dst, true_dst),
+                ComparisonOp::Less => (true_dst, false_dst, false_dst),
+                ComparisonOp::Greater => (false_dst, false_dst, true_dst),
+                ComparisonOp::LessEq => (true_dst, true_dst, false_dst),
+                ComparisonOp::GreaterEq => (false_dst, true_dst, true_dst),
+            };
+            block.terminator = Terminator::SwitchCmp {
+                lhs,
+                rhs,
+                less_dst,
+                equal_dst,
+                greater_dst,
+            };
+            changed = true;
+        }
+        changed
     }
 }
 

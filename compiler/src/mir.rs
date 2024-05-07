@@ -1928,8 +1928,8 @@ enum Terminator {
         false_dst: BasicBlockIdx,
     },
     SwitchCmp {
-        lhs: SlotIdx,
-        rhs: SlotIdx,
+        lhs: Either<SlotIdx, Constant>,
+        rhs: Either<SlotIdx, Constant>,
         less_dst: BasicBlockIdx,
         equal_dst: BasicBlockIdx,
         greater_dst: BasicBlockIdx,
@@ -1948,6 +1948,12 @@ enum Terminator {
     Error,
 }
 
+fn fmt_switch_cmp_operand(
+    op: &Either<SlotIdx, Constant>,
+) -> impl std::fmt::Display + '_ {
+    op.as_ref().map_left(|slot| format!("_{}", slot.0))
+}
+
 impl fmt::Display for Terminator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1959,17 +1965,21 @@ impl fmt::Display for Terminator {
                 "switchBool(_{}) -> [false -> bb{}, true -> bb{}]",
                 scrutinee.0, false_dst.0, true_dst.0
             ),
+            Self::SwitchCmp { lhs, rhs, less_dst, equal_dst, greater_dst } => {
+                write!(
+                    f,
+                    "switchCmp({}, {}) [less -> bb{}, equal -> bb{}, greater \
+                     -> bb{}]",
+                    fmt_switch_cmp_operand(lhs),
+                    fmt_switch_cmp_operand(rhs),
+                    less_dst.0,
+                    equal_dst.0,
+                    greater_dst.0,
+                )
+            }
             Self::Return => write!(f, "return"),
             Self::Unreachable => write!(f, "unreachable"),
             Self::Error => write!(f, "{{error}}"),
-            Self::SwitchCmp { lhs, rhs, less_dst, equal_dst, greater_dst } => f
-                .debug_struct("SwitchCmp")
-                .field("lhs", lhs)
-                .field("rhs", rhs)
-                .field("less_dst", less_dst)
-                .field("equal_dst", equal_dst)
-                .field("greater_dst", greater_dst)
-                .finish(),
             Self::Call { func, args, return_destination, target } => {
                 write!(
                     f,

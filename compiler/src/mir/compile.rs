@@ -258,20 +258,9 @@ fn emit_function(
             Terminator::SwitchBool { scrutinee, true_dst, false_dst } => {
                 todo!()
             }
-            Terminator::SwitchCmp {
-                lhs,
-                rhs,
-                less_dst,
-                equal_dst,
-                greater_dst,
-            } => todo!(),
+            Terminator::SwitchCmp { .. } => todo!(),
             Terminator::Unreachable => todo!(),
-            Terminator::Call {
-                ref func,
-                ref args,
-                ref return_destination,
-                target,
-            } => {
+            Terminator::Call { .. } => {
                 todo!()
             }
             Terminator::Error => todo!(),
