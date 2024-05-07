@@ -2,10 +2,7 @@
 //!
 //! * Combining blocks
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    ops::ControlFlow,
-};
+use std::collections::{BTreeMap, VecDeque};
 
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};

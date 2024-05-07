@@ -1794,17 +1794,23 @@ fn lower_assignment_expression(
                         Terminator::Goto { target: next_block },
                     );
                 }
-                TypeKind::Array { .. } => todo!(),
-                TypeKind::Slice { .. } => todo!(),
-                TypeKind::Tuple(_) => todo!(),
+                TypeKind::Array { .. } => {
+                    unimplemented!("arrays not implemented")
+                }
+                TypeKind::Slice { .. } => {
+                    unimplemented!("slices not implemented")
+                }
+                TypeKind::Tuple(_) => unimplemented!("tuples not implemented"),
                 _ => unreachable!(
                     "cannot index {base_ty:?} (TODO: type-checking should \
                      have caught this)"
                 ),
             }
         }
-        hir::ExpressionKind::UnaryOp { op: UnaryOp::Deref, operand } => {
-            todo!("assignment to deref (For now, just do ptr[0] = ...)")
+        hir::ExpressionKind::UnaryOp { op: UnaryOp::Deref, .. } => {
+            unimplemented!(
+                "assignment to deref (For now, just do ptr[0] = ...)"
+            )
         }
         hir::ExpressionKind::UnaryOp { .. }
         | hir::ExpressionKind::If { .. }
@@ -1872,7 +1878,9 @@ fn lower_statement(
                     );
                     initial_block
                 }
-                None => todo!(),
+                None => {
+                    unimplemented!("uninitalized locals not yet implemented")
+                }
             }
         }
         hir::Statement::Expression { expression, .. } => {
