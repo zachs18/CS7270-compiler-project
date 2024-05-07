@@ -447,7 +447,8 @@ fn replace_copy_in_operand(
 }
 
 /// Replace `Copy(slot)` with `new_operand` anywhere it occurs. If this op is a
-/// write to `src_local`, return a conflict.
+/// write to `src_local`, return a conflict. If this op is a write to a
+/// deref-place, also replace `slot` in the place local and/or index.
 ///
 /// Returns whether a change was made, and whether a conflict was detected.
 fn replace_copy_in_operation(
@@ -457,28 +458,33 @@ fn replace_copy_in_operation(
     match op {
         BasicOperation::Nop => (false, false),
         BasicOperation::Assign(place, value) => {
-            let conflict = src_local
-                .is_some_and(|src_local| src_local == place.local)
-                && place.projection.is_none();
-            let mut changed = false;
+            let mut changed = replace_copy_in_value(value, slot, new_operand);
+            let Some(projection) = &mut place.projection else {
+                let conflict =
+                    src_local.is_some_and(|src_local| src_local == place.local);
+                return (changed, conflict);
+            };
+            let &Operand::Copy(Place {
+                local: new_operand_local,
+                projection: None,
+            }) = new_operand
+            else {
+                return (changed, false);
+            };
 
-            if let (
-                Some(PlaceProjection::DerefIndex(index_slot)),
-                &Operand::Copy(Place {
-                    local: new_operand_local,
-                    projection: None,
-                }),
-            ) = (&mut place.projection, new_operand)
-            {
+            if place.local == slot {
+                place.local = new_operand_local;
+                changed = true;
+            }
+
+            if let PlaceProjection::DerefIndex(index_slot) = projection {
                 if *index_slot == slot {
                     *index_slot = new_operand_local;
-                    changed |= true;
+                    changed = true;
                 }
             }
 
-            changed |= replace_copy_in_value(value, slot, new_operand);
-
-            (changed, conflict)
+            (changed, false)
         }
     }
 }
