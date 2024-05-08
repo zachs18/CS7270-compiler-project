@@ -4,15 +4,17 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use either::Either;
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
-use crate::ast::{ArithmeticOp, BinaryOp, ComparisonOp};
+use crate::{
+    ast::{ArithmeticOp, BinaryOp, ComparisonOp},
+    hir::PointerSized,
+};
 
 use super::{
-    BasicBlock, BasicBlockIdx, BasicOperation, Body, Constant, Operand, Place,
-    PlaceProjection, SlotIdx, Terminator, Value,
+    BasicBlock, BasicBlockIdx, BasicOperation, Body, Constant, LocalOrConstant,
+    Operand, Place, PlaceProjection, SlotIdx, Terminator, Value,
 };
 
 pub trait MirOptimization {
@@ -343,8 +345,8 @@ impl MirOptimization for TrimUnreachableBlocks {
 }
 
 /// Find slots which are only used in one body, are assigned from a Copy from
-/// another slot, and are only used to be Copy'd from, and try to inline them
-/// into their usage.
+/// another slot or a constant, and are only used to be Copy'd from or in
+/// `Switch` terminators, and try to inline them into their usage.
 ///
 /// This is not always possible, e.g. if the slot they were copied from is
 /// changed between the init and usage.
@@ -377,18 +379,30 @@ impl MirOptimization for TrimUnreachableBlocks {
 /// ```text
 /// // Before
 /// bb0 {
-///     _3 = Copy(_2);
+///     _3 = const 5_i32;
 ///     *_4 = Copy(_3);
 ///     _5 = call(Copy(_3)) -> bb1;
 /// }
 /// // After
 /// bb0 {
-///     _3 = Copy(_2);
-///     *_4 = Copy(_2);
-///     _5 = call(Copy(_2)) -> bb1;
+///     _3 = const 5_i32;
+///     *_4 = const 5_i32;
+///     _5 = call(const 5_i32) -> bb1;
 /// }
 /// ```
-pub struct RedundantCopyEliminiation;
+/// ```text
+/// // Before
+/// bb0 {
+///     _2 = const 5_i32;
+///     switchCmp(_2, _3) [less -> bb1, equal -> bb1, greater -> bb2]
+/// }
+/// // After
+/// bb0 {
+///     _2 = const 5_i32;
+///     switchCmp(const 5_i32, _3) [less -> bb1, equal -> bb1, greater -> bb2]
+/// }
+/// ```
+pub struct RedundantLocalReadEliminiation;
 
 fn replace_copy_in_value(
     value: &mut Value, slot: SlotIdx, new_operand: &Operand,
@@ -489,7 +503,29 @@ fn replace_copy_in_operation(
     }
 }
 
-impl MirOptimization for RedundantCopyEliminiation {
+fn replace_copy_in_switch_operand(
+    operand: &mut LocalOrConstant, slot: SlotIdx, new_operand: &Operand,
+) -> bool {
+    let new_operand = match *new_operand {
+        Operand::Copy(Place { local, projection: None }) => {
+            LocalOrConstant::Local(local)
+        }
+        Operand::Copy(Place { projection: Some(..), .. }) => return false,
+        Operand::Constant(ref constant) => {
+            LocalOrConstant::Constant(constant.clone())
+        }
+    };
+    let LocalOrConstant::Local(operand_slot) = operand else {
+        return false;
+    };
+    if *operand_slot != slot {
+        return false;
+    }
+    *operand = new_operand;
+    true
+}
+
+impl MirOptimization for RedundantLocalReadEliminiation {
     fn apply(&self, body: &mut Body) -> bool {
         // TODO: expand this to look between basic blocks. For now it only works
         // in one basic block, which is probably good enough.
@@ -545,7 +581,8 @@ impl MirOptimization for RedundantCopyEliminiation {
                 }
 
                 // Replace `Copy(slot)` with `new_operand` wherever it occurs in
-                // the terminator.
+                // the terminator, or replace `slot` with `new_operand` in
+                // `Switch` terminators if it is `Copy(_)` or `const`.
                 match &mut block.terminator {
                     Terminator::Call { func, args, .. } => {
                         changed |=
@@ -564,9 +601,26 @@ impl MirOptimization for RedundantCopyEliminiation {
                             );
                         }
                     }
+                    Terminator::SwitchBool { scrutinee, .. } => {
+                        changed |= replace_copy_in_switch_operand(
+                            scrutinee,
+                            slot,
+                            &new_operand,
+                        );
+                    }
+                    Terminator::SwitchCmp { lhs, rhs, .. } => {
+                        changed |= replace_copy_in_switch_operand(
+                            lhs,
+                            slot,
+                            &new_operand,
+                        );
+                        changed |= replace_copy_in_switch_operand(
+                            rhs,
+                            slot,
+                            &new_operand,
+                        );
+                    }
                     Terminator::Goto { .. }
-                    | Terminator::SwitchBool { .. }
-                    | Terminator::SwitchCmp { .. }
                     | Terminator::Return
                     | Terminator::Unreachable => {}
                     Terminator::Error => unreachable!(),
@@ -702,13 +756,15 @@ impl MirOptimization for DeadLocalWriteElimination {
             }
             match &block.terminator {
                 Terminator::SwitchBool { scrutinee, .. } => {
-                    slots[scrutinee.0] = true;
+                    if let LocalOrConstant::Local(scrutinee) = scrutinee {
+                        slots[scrutinee.0] = true;
+                    }
                 }
                 Terminator::SwitchCmp { lhs, rhs, .. } => {
-                    if let Either::Left(lhs) = lhs {
+                    if let LocalOrConstant::Local(lhs) = lhs {
                         slots[lhs.0] = true;
                     }
-                    if let Either::Left(rhs) = rhs {
+                    if let LocalOrConstant::Local(rhs) = rhs {
                         slots[rhs.0] = true;
                     }
                 }
@@ -834,13 +890,15 @@ fn find_slot_uses_in_basic_operation(slots: &mut [bool], op: &BasicOperation) {
 fn find_slot_uses_in_terminator(slots: &mut [bool], terminator: &Terminator) {
     match terminator {
         Terminator::SwitchBool { scrutinee, .. } => {
-            slots[scrutinee.0] = true;
+            if let LocalOrConstant::Local(scrutinee) = scrutinee {
+                slots[scrutinee.0] = true;
+            }
         }
         Terminator::SwitchCmp { lhs, rhs, .. } => {
-            if let Either::Left(lhs) = lhs {
+            if let LocalOrConstant::Local(lhs) = lhs {
                 slots[lhs.0] = true;
             }
-            if let Either::Left(rhs) = rhs {
+            if let LocalOrConstant::Local(rhs) = rhs {
                 slots[rhs.0] = true;
             }
         }
@@ -944,14 +1002,18 @@ fn replace_slot_uses_in_terminator(
         | Terminator::Unreachable
         | Terminator::Return => false,
         Terminator::SwitchBool { scrutinee, .. } => {
-            replace_slot(slots, scrutinee)
+            if let LocalOrConstant::Local(scrutinee) = scrutinee {
+                replace_slot(slots, scrutinee)
+            } else {
+                false
+            }
         }
         Terminator::SwitchCmp { lhs, rhs, .. } => {
             let mut changed = false;
-            if let Either::Left(lhs) = lhs {
+            if let LocalOrConstant::Local(lhs) = lhs {
                 changed |= replace_slot(slots, lhs);
             }
-            if let Either::Left(rhs) = rhs {
+            if let LocalOrConstant::Local(rhs) = rhs {
                 changed |= replace_slot(slots, rhs);
             }
             changed
@@ -1180,8 +1242,11 @@ impl MirOptimization for InsertSwitchCompare {
     fn apply(&self, body: &mut Body) -> bool {
         let mut changed = false;
         for block in &mut body.basic_blocks {
-            let Terminator::SwitchBool { scrutinee, true_dst, false_dst } =
-                block.terminator
+            let Terminator::SwitchBool {
+                scrutinee: LocalOrConstant::Local(scrutinee),
+                true_dst,
+                false_dst,
+            } = block.terminator
             else {
                 continue;
             };
@@ -1199,16 +1264,20 @@ impl MirOptimization for InsertSwitchCompare {
             };
             let lhs = match lhs {
                 &Operand::Copy(Place { local, projection: None }) => {
-                    Either::Left(local)
+                    LocalOrConstant::Local(local)
                 }
-                Operand::Constant(constant) => Either::Right(constant.clone()),
+                Operand::Constant(constant) => {
+                    LocalOrConstant::Constant(constant.clone())
+                }
                 _ => continue,
             };
             let rhs = match rhs {
                 &Operand::Copy(Place { local, projection: None }) => {
-                    Either::Left(local)
+                    LocalOrConstant::Local(local)
                 }
-                Operand::Constant(constant) => Either::Right(constant.clone()),
+                Operand::Constant(constant) => {
+                    LocalOrConstant::Constant(constant.clone())
+                }
                 _ => continue,
             };
             let (less_dst, equal_dst, greater_dst) = match cmp_op {
@@ -1232,10 +1301,10 @@ impl MirOptimization for InsertSwitchCompare {
     }
 }
 
-/// Find `SwtichBool` and `SwitchCmp` terminators with only a single target, and
-/// replace them with `Goto` terminators.
+/// Find `SwtichBool` and `SwitchCmp` terminators with only a single target, or
+/// whose condition is known, and replace them with `Goto` terminators.
 ///
-/// Example:
+/// Examples:
 /// ```text
 /// // Before
 /// bb0 {
@@ -1248,6 +1317,16 @@ impl MirOptimization for InsertSwitchCompare {
 ///     goto -> bb1
 /// }
 /// ```
+/// ```text
+/// // Before
+/// bb0 {
+///     switchBool(const true) [false -> bb1, true -> bb2]
+/// }
+/// // After
+/// bb0 {
+///     goto -> bb2
+/// }
+/// ```
 pub struct RedundantSwitchElimination;
 
 impl MirOptimization for RedundantSwitchElimination {
@@ -1255,22 +1334,85 @@ impl MirOptimization for RedundantSwitchElimination {
         let mut changed = false;
         for block in &mut body.basic_blocks {
             match block.terminator {
-                Terminator::SwitchBool { true_dst, false_dst, .. } => {
+                Terminator::SwitchBool {
+                    ref scrutinee,
+                    true_dst,
+                    false_dst,
+                } => {
                     if true_dst == false_dst {
                         block.terminator =
                             Terminator::Goto { target: true_dst };
                         changed = true;
+                    } else if let LocalOrConstant::Constant(scrutinee) =
+                        scrutinee
+                    {
+                        let next_bb = match scrutinee {
+                            Constant::Bool(true) => true_dst,
+                            Constant::Bool(false) => false_dst,
+                            _ => unreachable!(
+                                "non-bool constant in switchBool scrutinee"
+                            ),
+                        };
+                        block.terminator = Terminator::Goto { target: next_bb };
+                        changed = true;
                     }
                 }
                 Terminator::SwitchCmp {
+                    ref lhs,
+                    ref rhs,
                     less_dst,
                     equal_dst,
                     greater_dst,
-                    ..
                 } => {
                     if less_dst == equal_dst && equal_dst == greater_dst {
                         block.terminator =
                             Terminator::Goto { target: less_dst };
+                        changed = true;
+                    } else if let (
+                        LocalOrConstant::Constant(lhs),
+                        LocalOrConstant::Constant(rhs),
+                    ) = (lhs, rhs)
+                    {
+                        let Constant::Integer {
+                            value: lhs,
+                            signed: lhs_signed,
+                            bits: lhs_bits,
+                        } = *lhs
+                        else {
+                            unreachable!("non-integer in switchCmp terminator")
+                        };
+                        let Constant::Integer {
+                            value: rhs,
+                            signed: rhs_signed,
+                            bits: rhs_bits,
+                        } = *rhs
+                        else {
+                            unreachable!("non-integer in switchCmp terminator")
+                        };
+                        if lhs_signed != rhs_signed || lhs_bits != rhs_bits {
+                            unreachable!(
+                                "comparing different-typed integers in \
+                                 SwitchCmp terminator"
+                            );
+                        }
+                        let bits = match lhs_bits {
+                            either::Either::Left(bits) => bits,
+                            either::Either::Right(PointerSized) => {
+                                todo!("need ABI in mir for this")
+                            }
+                        };
+                        let next_bb = if !lhs_signed {
+                            let lhs = lhs & ((1 << bits) - 1);
+                            let rhs = rhs & ((1 << bits) - 1);
+                            match u128::cmp(&lhs, &rhs) {
+                                std::cmp::Ordering::Less => less_dst,
+                                std::cmp::Ordering::Equal => equal_dst,
+                                std::cmp::Ordering::Greater => greater_dst,
+                            }
+                        } else {
+                            todo!("signed SwitchCmp const opt")
+                        };
+                        block.terminator = Terminator::Goto { target: next_bb };
                         changed = true;
                     }
                 }

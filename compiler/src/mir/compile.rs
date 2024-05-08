@@ -372,7 +372,7 @@ fn emit_function(
                 }
             }
             Terminator::Return => emit_return(buffer)?,
-            Terminator::SwitchBool { scrutinee, true_dst, false_dst } => {
+            Terminator::SwitchBool { ref scrutinee, true_dst, false_dst } => {
                 todo!()
             }
             Terminator::SwitchCmp {

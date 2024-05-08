@@ -1339,7 +1339,7 @@ fn lower_value_expression(
                 body,
                 vec![],
                 Terminator::SwitchBool {
-                    scrutinee: condition_slot,
+                    scrutinee: LocalOrConstant::Local(condition_slot),
                     true_dst: then_block_idx,
                     false_dst: else_block_idx,
                 },
@@ -1920,18 +1920,33 @@ struct BasicBlock {
 }
 
 #[derive(Debug)]
+enum LocalOrConstant {
+    Local(SlotIdx),
+    Constant(Constant),
+}
+
+impl fmt::Display for LocalOrConstant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LocalOrConstant::Local(SlotIdx(slot)) => write!(f, "_{slot}"),
+            LocalOrConstant::Constant(constant) => write!(f, "{constant}"),
+        }
+    }
+}
+
+#[derive(Debug)]
 enum Terminator {
     Goto {
         target: BasicBlockIdx,
     },
     SwitchBool {
-        scrutinee: SlotIdx,
+        scrutinee: LocalOrConstant,
         true_dst: BasicBlockIdx,
         false_dst: BasicBlockIdx,
     },
     SwitchCmp {
-        lhs: Either<SlotIdx, Constant>,
-        rhs: Either<SlotIdx, Constant>,
+        lhs: LocalOrConstant,
+        rhs: LocalOrConstant,
         less_dst: BasicBlockIdx,
         equal_dst: BasicBlockIdx,
         greater_dst: BasicBlockIdx,
@@ -1950,12 +1965,6 @@ enum Terminator {
     Error,
 }
 
-fn fmt_switch_cmp_operand(
-    op: &Either<SlotIdx, Constant>,
-) -> impl std::fmt::Display + '_ {
-    op.as_ref().map_left(|slot| format!("_{}", slot.0))
-}
-
 impl fmt::Display for Terminator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1964,19 +1973,15 @@ impl fmt::Display for Terminator {
             }
             Self::SwitchBool { scrutinee, true_dst, false_dst } => write!(
                 f,
-                "switchBool(_{}) -> [false -> bb{}, true -> bb{}]",
-                scrutinee.0, false_dst.0, true_dst.0
+                "switchBool({}) -> [false -> bb{}, true -> bb{}]",
+                scrutinee, false_dst.0, true_dst.0
             ),
             Self::SwitchCmp { lhs, rhs, less_dst, equal_dst, greater_dst } => {
                 write!(
                     f,
                     "switchCmp({}, {}) [less -> bb{}, equal -> bb{}, greater \
                      -> bb{}]",
-                    fmt_switch_cmp_operand(lhs),
-                    fmt_switch_cmp_operand(rhs),
-                    less_dst.0,
-                    equal_dst.0,
-                    greater_dst.0,
+                    lhs, rhs, less_dst.0, equal_dst.0, greater_dst.0,
                 )
             }
             Self::Return => write!(f, "return"),

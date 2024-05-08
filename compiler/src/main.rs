@@ -94,11 +94,11 @@ fn main() -> ExitCode {
 
     println!();
 
-    apply_optimization!(CombineBlocks);
-    apply_optimization!(TrimUnreachableBlocks);
     loop {
         let mut changed = false;
-        changed |= apply_optimization!(RedundantCopyEliminiation);
+        changed |= apply_optimization!(CombineBlocks);
+        changed |= apply_optimization!(TrimUnreachableBlocks);
+        changed |= apply_optimization!(RedundantLocalReadEliminiation);
         changed |= apply_optimization!(DeadLocalWriteElimination);
         changed |= apply_optimization!(TrimUnusedSlots);
         changed |= apply_optimization!(ConstantPropagation);

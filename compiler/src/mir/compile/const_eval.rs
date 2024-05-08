@@ -98,8 +98,27 @@ impl CompilationUnit {
             }
             match &block.terminator {
                 &Terminator::Goto { target } => next_bb = target,
-                &Terminator::SwitchBool { scrutinee, true_dst, false_dst } => {
-                    match slots[scrutinee.0] {
+                &Terminator::SwitchBool {
+                    ref scrutinee,
+                    true_dst,
+                    false_dst,
+                } => {
+                    let scrutinee = match scrutinee {
+                        crate::mir::LocalOrConstant::Local(scrutinee) => {
+                            &slots[scrutinee.0]
+                        }
+                        crate::mir::LocalOrConstant::Constant(
+                            Constant::Bool(false),
+                        ) => &ConstEvalValue::Bool { value: false },
+                        crate::mir::LocalOrConstant::Constant(
+                            Constant::Bool(true),
+                        ) => &ConstEvalValue::Bool { value: true },
+                        _ => unreachable!(
+                            "invalid switchbool scrutinee constant in const \
+                             eval"
+                        ),
+                    };
+                    match scrutinee {
                         ConstEvalValue::Bool { value: true } => {
                             next_bb = true_dst
                         }
