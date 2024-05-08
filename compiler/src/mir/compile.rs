@@ -286,7 +286,10 @@ fn emit_function(
             Value::Operand(Operand::Constant(Constant::Bool(value))) => {
                 writeln!(buffer, "li {dst}, {}", value as u8)
             }
-            Value::Operand(Operand::Constant(Constant::Integer(value))) => {
+            Value::Operand(Operand::Constant(Constant::Integer {
+                value,
+                ..
+            })) => {
                 writeln!(buffer, "li {dst}, {}", value as i64)
             }
             Value::Operand(Operand::Constant(Constant::ItemAddress(item))) => {
@@ -372,9 +375,24 @@ fn emit_function(
             Terminator::SwitchBool { scrutinee, true_dst, false_dst } => {
                 todo!()
             }
-            Terminator::SwitchCmp { .. } => todo!(),
+            Terminator::SwitchCmp {
+                ref lhs,
+                ref rhs,
+                less_dst,
+                equal_dst,
+                greater_dst,
+            } => {
+                todo!("load lhs into t0");
+                todo!("load rhs into t1");
+                todo!("compare and jump");
+            }
             Terminator::Unreachable => todo!(),
-            Terminator::Call { .. } => {
+            Terminator::Call {
+                ref func,
+                ref args,
+                ref return_destination,
+                target,
+            } => {
                 todo!()
             }
             Terminator::Error => todo!(),

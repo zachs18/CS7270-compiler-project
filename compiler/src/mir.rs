@@ -6,12 +6,7 @@
 //! Note: Assignments to slots of type `()` may be ignored (since they do
 //! nothing).
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    mem::ManuallyDrop,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, mem::ManuallyDrop, sync::Arc};
 
 use either::Either;
 use itertools::Itertools;
@@ -1158,11 +1153,18 @@ fn lower_value_expression(
             body.insert_block(block)
         }
         hir::ExpressionKind::Integer(value) => {
+            let Some(&hir::TypeKind::Integer { signed, bits }) =
+                ctx.resolve_ty(orig_expr.type_)
+            else {
+                unreachable!("integer expression's type is not integral")
+            };
             let op = BasicOperation::Assign(
                 Place::from(dst_slot),
-                Value::Operand(Operand::Constant(Constant::Integer(
-                    value.value,
-                ))),
+                Value::Operand(Operand::Constant(Constant::Integer {
+                    value: value.value,
+                    signed,
+                    bits,
+                })),
             );
             let block = BasicBlock {
                 operations: vec![op],
@@ -2115,7 +2117,7 @@ impl fmt::Display for Value {
 
 #[derive(Debug, Clone)]
 enum Constant {
-    Integer(u128),
+    Integer { value: u128, signed: bool, bits: Either<u32, PointerSized> },
     Bool(bool),
     Tuple(Arc<[Constant]>),
     ItemAddress(Symbol),
@@ -2123,10 +2125,20 @@ enum Constant {
 
 impl fmt::Display for Constant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Constant::Integer(i) => write!(f, "const {i}"),
+        match *self {
+            Constant::Integer { value, signed, bits } => {
+                let bits = match bits {
+                    Either::Left(ref bits) => bits as &dyn std::fmt::Display,
+                    Either::Right(_) => &"size",
+                };
+                if signed {
+                    write!(f, "const {i}_u{bits}", i = value as i128)
+                } else {
+                    write!(f, "const {i}_u{bits}", i = value)
+                }
+            }
             Constant::Bool(b) => write!(f, "const {b}"),
-            Constant::Tuple(elems) => {
+            Constant::Tuple(ref elems) => {
                 write!(f, "const ({})", FmtSlice::new(elems, ", "))
             }
             Constant::ItemAddress(item) => {

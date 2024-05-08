@@ -1044,22 +1044,30 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 $(
                     &mut Value::BinaryOp(
                         $op,
-                        Operand::Constant(Constant::Integer(lhs)),
-                        Operand::Constant(Constant::Integer(rhs)),
+                        Operand::Constant(Constant::Integer { value: lhs, signed: lhs_signed, bits: lhs_bits }),
+                        Operand::Constant(Constant::Integer { value: rhs, signed: rhs_signed, bits: rhs_bits }),
                     ) => {
+                        if lhs_signed != rhs_signed || lhs_bits != rhs_bits {
+                            dbg!(lhs_signed, rhs_signed, lhs_bits, rhs_bits);
+                            panic!("operating on different-typed integers");
+                        }
                         $(
-                            *value = Value::Operand(Operand::Constant(Constant::Integer(
-                                u128::$u128_method(lhs, rhs),
-                            )));
+                            *value = Value::Operand(Operand::Constant(Constant::Integer {
+                                value: u128::$u128_method(lhs, rhs),
+                                signed: lhs_signed,
+                                bits: lhs_bits,
+                            }));
                         )?
                         $(
-                            *value = Value::Operand(Operand::Constant(Constant::Integer(
-                                {
+                            *value = Value::Operand(Operand::Constant(Constant::Integer {
+                                value: {
                                     let $lhs = lhs;
                                     let $rhs = rhs;
                                     $value
                                 },
-                            )));
+                                signed: lhs_signed,
+                                bits: lhs_bits,
+                            }));
                         )?
                         true
                     },
@@ -1068,10 +1076,10 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::BinaryOp(
                     BinaryOp::Arithmetic(ArithmeticOp::Add) | BinaryOp::Arithmetic(ArithmeticOp::Subtract),
                     other,
-                    Operand::Constant(Constant::Integer(0)),
+                    Operand::Constant(Constant::Integer{ value:0, .. }),
                 ) | Value::BinaryOp(
                     BinaryOp::Arithmetic(ArithmeticOp::Add),
-                    Operand::Constant(Constant::Integer(0)),
+                    Operand::Constant(Constant::Integer{ value:0, .. }),
                     other,
                 ) => {
                     *value = Value::Operand(other.clone());
@@ -1082,8 +1090,8 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::Negate(inner) => {
                     let inner_changed = constant_propagate_value(inner);
                     match **inner {
-                        Value::Operand(Operand::Constant(Constant::Integer(inner))) => {
-                            *value = Value::from(Constant::Integer(u128::wrapping_neg(inner)));
+                        Value::Operand(Operand::Constant(Constant::Integer { value: inner, signed, bits })) => {
+                            *value = Value::from(Constant::Integer{ value: u128::wrapping_neg(inner), signed, bits });
                             true
                         }
                         Value::Negate(ref inner) => {
@@ -1096,8 +1104,8 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::Not(inner) => {
                     let inner_changed = constant_propagate_value(inner);
                     match **inner {
-                        Value::Operand(Operand::Constant(Constant::Integer(inner))) => {
-                            *value = Value::from(Constant::Integer(!inner));
+                        Value::Operand(Operand::Constant(Constant::Integer { value: inner, signed, bits })) => {
+                            *value = Value::from(Constant::Integer{ value: !inner, signed, bits });
                             true
                         }
                         Value::Operand(Operand::Constant(Constant::Bool(inner))) => {

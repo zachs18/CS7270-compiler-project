@@ -1,5 +1,7 @@
+use either::Either;
+
 use crate::{
-    hir::TypeKind,
+    hir::{PointerSized, TypeKind},
     mir::{
         BasicBlockIdx, BasicOperation, Body, CompilationUnit, Constant,
         Operand, Place, SlotIdx, Terminator, TypeIdx, Value,
@@ -11,14 +13,16 @@ use super::CompilationState;
 #[derive(Debug, Clone)]
 enum ConstEvalValue {
     Uninit,
-    Integer { value: u128 },
+    Integer { value: u128, signed: bool, bits: Either<u32, PointerSized> },
     Bool { value: bool },
 }
 
 impl ConstEvalValue {
     fn from_constant(c: &Constant) -> Self {
         match *c {
-            Constant::Integer(value) => Self::Integer { value },
+            Constant::Integer { value, signed, bits } => {
+                Self::Integer { value, signed, bits }
+            }
             Constant::Bool(value) => Self::Bool { value },
             Constant::Tuple(_) => todo!(),
             Constant::ItemAddress(_) => todo!(),
@@ -34,7 +38,7 @@ impl CompilationUnit {
             ConstEvalValue::Uninit => {
                 unreachable!("should not have uninit in final const eval value")
             }
-            ConstEvalValue::Integer { value } => {
+            ConstEvalValue::Integer { value, .. } => {
                 let layout = self.layout(ty, state);
                 let mut bytes = vec![0; layout.size()];
                 let value = value.to_le_bytes();
