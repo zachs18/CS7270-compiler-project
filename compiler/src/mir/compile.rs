@@ -392,7 +392,33 @@ fn emit_function(
             }
             Terminator::Return => emit_return(buffer)?,
             Terminator::SwitchBool { ref scrutinee, true_dst, false_dst } => {
-                todo!()
+                emit_load_local_or_constant(buffer, scrutinee, "t0")?;
+                let next_emitted_block =
+                    basic_block_order.get(idx + 1).copied();
+
+                if next_emitted_block == Some(true_dst) {
+                    // jump to false if false, else fallthrough
+                    writeln!(
+                        buffer,
+                        "beqz t0, {}",
+                        basic_block_label!(false_dst)
+                    )?;
+                } else if next_emitted_block == Some(false_dst) {
+                    // jump to true if true, else fallthrough
+                    writeln!(
+                        buffer,
+                        "bnez t0, {}",
+                        basic_block_label!(true_dst)
+                    )?;
+                } else {
+                    // jump to false if false, else jump to true
+                    writeln!(
+                        buffer,
+                        "beqz t0, {}",
+                        basic_block_label!(false_dst)
+                    )?;
+                    writeln!(buffer, "j {}", basic_block_label!(true_dst))?;
+                }
             }
             Terminator::SwitchCmp {
                 ref lhs,
@@ -401,9 +427,66 @@ fn emit_function(
                 equal_dst,
                 greater_dst,
             } => {
-                todo!("load lhs into t0");
-                todo!("load rhs into t1");
-                todo!("compare and jump");
+                emit_load_local_or_constant(buffer, lhs, "t0")?;
+                emit_load_local_or_constant(buffer, rhs, "t1")?;
+                let signed = match *lhs {
+                    LocalOrConstant::Local(slot) => {
+                        match compilation_unit.types[body.slots[slot.0].0] {
+                            TypeKind::Integer { signed, .. } => signed,
+                            _ => unreachable!("non-integer in SwitchCmp"),
+                        }
+                    }
+                    LocalOrConstant::Constant(Constant::Integer {
+                        signed,
+                        ..
+                    }) => signed,
+                    _ => unreachable!("non-integer in SwitchCmp"),
+                };
+                eprintln!("TODO: emit better code for SwitchCmp");
+                #[cfg(any())]
+                match (
+                    less_dst == greater_dst,
+                    less_dst == equal_dst,
+                    equal_dst == greater_dst,
+                ) {
+                    (true, true, true)
+                    | (true, true, false)
+                    | (false, true, true)
+                    | (true, false, true) => todo!(),
+                    // == or !=
+                    (true, false, false) => {
+                        todo!()
+                    }
+                    (false, true, false) => todo!(),
+                    (false, false, true) => todo!(),
+                    (false, false, false) => todo!(),
+                }
+
+                if signed {
+                    writeln!(
+                        buffer,
+                        "blt t0, t1, {}",
+                        basic_block_label!(less_dst)
+                    )?;
+                    writeln!(
+                        buffer,
+                        "bgt t0, t1, {}",
+                        basic_block_label!(greater_dst)
+                    )?;
+                    writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
+                } else {
+                    writeln!(
+                        buffer,
+                        "bltu t0, t1, {}",
+                        basic_block_label!(less_dst)
+                    )?;
+                    writeln!(
+                        buffer,
+                        "bgtu t0, t1, {}",
+                        basic_block_label!(greater_dst)
+                    )?;
+                    writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
+                }
             }
             Terminator::Unreachable => todo!(),
             Terminator::Call {
