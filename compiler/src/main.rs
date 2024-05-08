@@ -109,6 +109,10 @@ fn main() -> ExitCode {
         }
     }
 
+    // This doesn't change anything about the semantics, so there's no reason to
+    // do it multiple times.
+    apply_optimization!(SortBlocks);
+
     let state = CompilationState::new(ISA::RV64I, ABI::LP64)
         .expect("valid arch/abi combination");
 

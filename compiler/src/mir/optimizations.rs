@@ -2,7 +2,7 @@
 //!
 //! * Combining blocks
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
@@ -277,6 +277,47 @@ fn find_reachable_blocks_from(
     reachable
 }
 
+/// Used in TrimUnreachableBlocks and SortBlocks
+///
+/// `block_idx_mapping` should have a mapping from the old idx to the new idx
+/// for every block which changed (i.e. if an entry is missing, it is assumed
+/// that that block's index did not change).
+fn fixup_terminators_after_changing_block_indices(
+    blocks: &mut [BasicBlock], block_idx_mapping: &BTreeMap<usize, usize>,
+) {
+    macro_rules! fixup_block_idx {
+        ($($block:expr),*) => {{
+            $(
+                let block: &mut BasicBlockIdx = $block;
+                if let Some(&new) = block_idx_mapping.get(&block.0) {
+                    block.0 = new;
+                }
+            )*
+        }};
+    }
+
+    for block in blocks {
+        match &mut block.terminator {
+            Terminator::Goto { target } => fixup_block_idx!(target),
+            Terminator::SwitchBool { true_dst, false_dst, .. } => {
+                fixup_block_idx!(true_dst, false_dst)
+            }
+            Terminator::SwitchCmp {
+                less_dst, equal_dst, greater_dst, ..
+            } => {
+                fixup_block_idx!(less_dst, equal_dst, greater_dst)
+            }
+            Terminator::Call { target, .. } => fixup_block_idx!(target),
+            Terminator::Return | Terminator::Unreachable => {
+                // no targets to fixup
+            }
+            Terminator::Error => {
+                unreachable!("Terminator::Error after MIR-building")
+            }
+        }
+    }
+}
+
 impl MirOptimization for TrimUnreachableBlocks {
     fn apply(&self, body: &mut Body) -> bool {
         let reachable = find_reachable_blocks_from(body, [BasicBlockIdx(0)]);
@@ -305,40 +346,10 @@ impl MirOptimization for TrimUnreachableBlocks {
             .zip(0..)
             .collect();
 
-        macro_rules! fixup_block_idx {
-            ($($block:expr),*) => {{
-                $(
-                    let block: &mut BasicBlockIdx = $block;
-                    if let Some(&new) = block_idx_mapping.get(&block.0) {
-                        block.0 = new;
-                    }
-                )*
-            }};
-        }
-
-        for block in &mut body.basic_blocks {
-            match &mut block.terminator {
-                Terminator::Goto { target } => fixup_block_idx!(target),
-                Terminator::SwitchBool { true_dst, false_dst, .. } => {
-                    fixup_block_idx!(true_dst, false_dst)
-                }
-                Terminator::SwitchCmp {
-                    less_dst,
-                    equal_dst,
-                    greater_dst,
-                    ..
-                } => {
-                    fixup_block_idx!(less_dst, equal_dst, greater_dst)
-                }
-                Terminator::Call { target, .. } => fixup_block_idx!(target),
-                Terminator::Return | Terminator::Unreachable => {
-                    // no targets to fixup
-                }
-                Terminator::Error => {
-                    unreachable!("Terminator::Error after MIR-building")
-                }
-            }
-        }
+        fixup_terminators_after_changing_block_indices(
+            &mut body.basic_blocks,
+            &block_idx_mapping,
+        );
 
         true
     }
@@ -1420,5 +1431,178 @@ impl MirOptimization for RedundantSwitchElimination {
             }
         }
         changed
+    }
+}
+
+/// Sort basic blocks pseudo-topologically. We can't in general sort
+/// topologically because there may be back-edges due to control-flow cycles.
+///
+/// TODO: use a better algorithm. Currently we just use DFS to find a longest
+/// non-cyclic path starting from the lowest-numbered non-emitted basic block,
+/// then repeat until all blocks have been emitted.
+///
+/// Example:
+/// ```text
+/// // Before
+/// bb0 {
+///     switchBool(_1) [false -> bb2, true -> bb3]
+/// }
+/// bb1 {
+///     return
+/// }
+/// bb2 {
+///     switchBool(_2) [false -> bb1, true -> bb0]
+/// }
+/// bb3 {
+///     goto -> bb2
+/// }
+/// // After
+/// bb0 {
+///     switchBool(_1) [false -> bb2, true -> bb1]
+/// }
+/// bb1 {
+///     goto -> bb2
+/// }
+/// bb2 {
+///     switchBool(_2) [false -> bb3, true -> bb0]
+/// }
+/// bb3 {
+///     return
+/// }
+/// ```
+pub struct SortBlocks;
+
+/// Enumerate all control-flow paths in `body` starting from `this_path.last()`
+/// and ending either before a basic block where `seen_blocks[i] == true` or
+/// with a non-branching terminator.
+fn enumerate_paths(
+    body: &Body, seen_blocks: &mut [bool], paths: &mut Vec<Vec<BasicBlockIdx>>,
+    this_path: &mut Vec<BasicBlockIdx>,
+) {
+    let start = this_path.last().copied().unwrap();
+    match body.basic_blocks[start.0].terminator {
+        Terminator::Goto { target } | Terminator::Call { target, .. } => {
+            if seen_blocks[target.0] {
+                paths.push(this_path.clone());
+            } else {
+                seen_blocks[target.0] = true;
+                this_path.push(target);
+                enumerate_paths(body, seen_blocks, paths, this_path);
+                this_path.pop();
+                seen_blocks[target.0] = false;
+            }
+        }
+        Terminator::SwitchBool { true_dst, false_dst, .. } => {
+            if seen_blocks[true_dst.0] && seen_blocks[false_dst.0] {
+                paths.push(this_path.clone());
+            } else {
+                if !seen_blocks[true_dst.0] {
+                    seen_blocks[true_dst.0] = true;
+                    this_path.push(true_dst);
+                    enumerate_paths(body, seen_blocks, paths, this_path);
+                    this_path.pop();
+                    seen_blocks[true_dst.0] = false;
+                }
+                if !seen_blocks[false_dst.0] {
+                    seen_blocks[false_dst.0] = true;
+                    this_path.push(false_dst);
+                    enumerate_paths(body, seen_blocks, paths, this_path);
+                    this_path.pop();
+                    seen_blocks[false_dst.0] = false;
+                }
+            }
+        }
+        Terminator::SwitchCmp { less_dst, equal_dst, greater_dst, .. } => {
+            if seen_blocks[less_dst.0]
+                && seen_blocks[equal_dst.0]
+                && seen_blocks[greater_dst.0]
+            {
+                paths.push(this_path.clone());
+            } else {
+                if !seen_blocks[less_dst.0] {
+                    seen_blocks[less_dst.0] = true;
+                    this_path.push(less_dst);
+                    enumerate_paths(body, seen_blocks, paths, this_path);
+                    this_path.pop();
+                    seen_blocks[less_dst.0] = false;
+                }
+                if !seen_blocks[equal_dst.0] {
+                    seen_blocks[equal_dst.0] = true;
+                    this_path.push(equal_dst);
+                    enumerate_paths(body, seen_blocks, paths, this_path);
+                    this_path.pop();
+                    seen_blocks[equal_dst.0] = false;
+                }
+                if !seen_blocks[greater_dst.0] {
+                    seen_blocks[greater_dst.0] = true;
+                    this_path.push(greater_dst);
+                    enumerate_paths(body, seen_blocks, paths, this_path);
+                    this_path.pop();
+                    seen_blocks[greater_dst.0] = false;
+                }
+            }
+        }
+        Terminator::Return | Terminator::Unreachable => {
+            paths.push(this_path.clone());
+        }
+        Terminator::Error => unreachable!(),
+    }
+}
+
+impl MirOptimization for SortBlocks {
+    fn apply(&self, body: &mut Body) -> bool {
+        let mut new_block_order = vec![];
+        let mut seen_blocks = vec![false; body.basic_blocks.len()];
+        while let Some(first_unseen_idx) =
+            seen_blocks.iter().position(|block_seen| !block_seen)
+        {
+            let mut this_path = vec![BasicBlockIdx(first_unseen_idx)];
+            let mut paths = vec![];
+            seen_blocks[first_unseen_idx] = true;
+            enumerate_paths(body, &mut seen_blocks, &mut paths, &mut this_path);
+            let longest_path = paths
+                .iter()
+                .max_by_key(|path| path.len())
+                .expect("path should exist");
+            new_block_order.extend(longest_path.iter().copied());
+            for block in longest_path {
+                seen_blocks[block.0] = true;
+            }
+        }
+
+        debug_assert!(new_block_order.len() == body.basic_blocks.len());
+        debug_assert!(
+            new_block_order.iter().collect::<HashSet<_>>().len()
+                == body.basic_blocks.len()
+        );
+
+        // Rearrange the basic blocks according to new_block_order
+        let mut new_blocks = vec![];
+        for &block in &new_block_order {
+            const EMPTY_BLOCK: BasicBlock = BasicBlock {
+                operations: vec![],
+                terminator: Terminator::Error,
+            };
+            new_blocks.push(std::mem::replace(
+                &mut body.basic_blocks[block.0],
+                EMPTY_BLOCK,
+            ));
+        }
+        body.basic_blocks = new_blocks;
+
+        // new_block_order is mapping from new to old, but we need a mapping
+        // from old to new to fixup terminators
+        let block_idx_mapping: BTreeMap<usize, usize> = new_block_order
+            .iter()
+            .enumerate()
+            .map(|(new, old)| (old.0, new))
+            .collect();
+
+        fixup_terminators_after_changing_block_indices(
+            &mut body.basic_blocks,
+            &block_idx_mapping,
+        );
+
+        true
     }
 }
