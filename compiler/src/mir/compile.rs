@@ -483,11 +483,11 @@ impl CompilationUnit {
                 match (signed, bits, pointer_bits) {
                     (_, 64, 64) => ["ld", "sd"],
                     (_, 32, 32) | (true, 32, _) => ["lw", "sw"],
-                    (false, 32, _) => ["lwu", "swu"],
+                    (false, 32, _) => ["lwu", "sw"],
                     (true, 16, _) => ["lh", "sh"],
-                    (false, 16, _) => ["lhu", "shu"],
+                    (false, 16, _) => ["lhu", "sh"],
                     (true, 8, _) => ["lb", "sb"],
-                    (false, 8, _) => ["lbu", "sbu"],
+                    (false, 8, _) => ["lbu", "sb"],
                     (true, _, _) => {
                         unimplemented!("loading i{bits} on RV{pointer_bits}")
                     }
@@ -496,7 +496,7 @@ impl CompilationUnit {
                     }
                 }
             }
-            TypeKind::Bool => ["lbu", "sbu"],
+            TypeKind::Bool => ["lbu", "sb"],
             TypeKind::Tuple(ref fields) if fields.len() == 0 => return None,
             ref ty => unimplemented!("loading {ty:?}"),
         })
