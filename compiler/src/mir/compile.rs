@@ -18,7 +18,7 @@ use crate::{
     hir::PointerSized,
     mir::{
         BasicBlockIdx, BasicOperation, CompilationUnit, Constant, ItemKind,
-        Operand, Place, SlotIdx, Terminator, Value,
+        LocalOrConstant, Operand, Place, SlotIdx, Terminator, Value,
     },
 };
 
@@ -265,6 +265,37 @@ fn emit_function(
             writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
         };
 
+    // Load constant into register (should be a temporary register)
+    let emit_load_constant =
+        |buffer: &mut String, constant: &Constant, dst: &str| -> fmt::Result {
+            use fmt::Write;
+            match *constant {
+                Constant::Integer { value, .. } => {
+                    writeln!(buffer, "li {dst}, {}", value as i64)
+                }
+                Constant::Bool(value) => {
+                    writeln!(buffer, "li {dst}, {}", value as u8)
+                }
+                Constant::ItemAddress(_) => todo!(),
+                Constant::Tuple(_) => unimplemented!("tuples"),
+            }
+        };
+
+    // Store register into local slot (register should be a temporary register)
+    let emit_load_local_or_constant = |buffer: &mut String,
+                                       local: &LocalOrConstant,
+                                       dst: &str|
+     -> fmt::Result {
+        match local {
+            &LocalOrConstant::Local(local) => {
+                emit_load_local(buffer, local, dst)
+            }
+            LocalOrConstant::Constant(constant) => {
+                emit_load_constant(buffer, constant, dst)
+            }
+        }
+    };
+
     // Store register into local slot (register should be a temporary register)
     let emit_store_local =
         |buffer: &mut String, local: SlotIdx, src: &str| -> fmt::Result {
@@ -278,46 +309,34 @@ fn emit_function(
             writeln!(buffer, "{store_inst} {src}, {offset}(sp)")
         };
 
-    let emit_evaluate_value = |buffer: &mut String,
-                               value: &Value,
-                               dst: &str|
-     -> fmt::Result {
-        match *value {
-            Value::Operand(Operand::Constant(Constant::Bool(value))) => {
-                writeln!(buffer, "li {dst}, {}", value as u8)
-            }
-            Value::Operand(Operand::Constant(Constant::Integer {
-                value,
-                ..
-            })) => {
-                writeln!(buffer, "li {dst}, {}", value as i64)
-            }
-            Value::Operand(Operand::Constant(Constant::ItemAddress(item))) => {
-                todo!()
-            }
-            Value::Operand(Operand::Copy(Place {
-                local,
-                projection: None,
-            })) => {
-                let Some([load_inst, _]) = compilation_unit
-                    .load_store_instructions(body.slots[local.0], state)
-                else {
-                    return Ok(());
-                };
-                let offset = slot_locations[local.0];
-                writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
-            }
+    let emit_evaluate_value =
+        |buffer: &mut String, value: &Value, dst: &str| -> fmt::Result {
+            match *value {
+                Value::Operand(Operand::Constant(ref constant)) => {
+                    emit_load_constant(buffer, constant, dst)
+                }
+                Value::Operand(Operand::Copy(Place {
+                    local,
+                    projection: None,
+                })) => {
+                    let Some([load_inst, _]) = compilation_unit
+                        .load_store_instructions(body.slots[local.0], state)
+                    else {
+                        return Ok(());
+                    };
+                    let offset = slot_locations[local.0];
+                    writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
+                }
 
-            Value::Operand(Operand::Copy(Place {
-                local,
-                projection: Some(ref projection),
-            })) => todo!(),
-            Value::Operand(Operand::Constant(Constant::Tuple(_))) => todo!(),
-            Value::BinaryOp(_, _, _) => todo!(),
-            Value::Not(_) => todo!(),
-            Value::Negate(_) => todo!(),
-        }
-    };
+                Value::Operand(Operand::Copy(Place {
+                    local,
+                    projection: Some(ref projection),
+                })) => todo!(),
+                Value::BinaryOp(_, _, _) => todo!(),
+                Value::Not(_) => todo!(),
+                Value::Negate(_) => todo!(),
+            }
+        };
 
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
