@@ -15,10 +15,12 @@ use indexmap::IndexSet;
 use zachs18_stdx::OptionExt;
 
 use crate::{
+    ast::ArithmeticOp,
     hir::PointerSized,
     mir::{
         BasicBlockIdx, BasicOperation, CompilationUnit, Constant, ItemKind,
-        LocalOrConstant, Operand, Place, SlotIdx, Terminator, Value,
+        LocalOrConstant, Operand, Place, PlaceProjection, SlotIdx, Terminator,
+        Value,
     },
 };
 
@@ -88,6 +90,8 @@ pub enum ABI {
     LP64D,
 }
 
+const TEMP_REGS: [&str; 7] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"];
+
 fn emit_static(
     buffer: &mut String, compilation_unit: &CompilationUnit,
     state: &CompilationState, value: &[u8], global: bool, alignment: usize,
@@ -113,6 +117,21 @@ fn emit_static(
         }
     }
     Ok(())
+}
+
+fn arithmetic_op_instruction(op: &ArithmeticOp) -> &str {
+    match op {
+        ArithmeticOp::Add => "add",
+        ArithmeticOp::Subtract => "sub",
+        ArithmeticOp::Multiply => todo!(),
+        ArithmeticOp::Divide => todo!(),
+        ArithmeticOp::Modulo => todo!(),
+        ArithmeticOp::And | ArithmeticOp::BitAnd => "and",
+        ArithmeticOp::Or | ArithmeticOp::BitOr => "or",
+        ArithmeticOp::BitXor => "xor",
+        ArithmeticOp::LeftShift => todo!(),
+        ArithmeticOp::RightShift => todo!(),
+    }
 }
 
 fn emit_function(
@@ -274,34 +293,114 @@ fn emit_function(
             writeln!(buffer, "{store_inst} {src}, {offset}(sp)")
         };
 
-    let emit_evaluate_value =
-        |buffer: &mut String, value: &Value, dst: &str| -> fmt::Result {
-            match *value {
-                Value::Operand(Operand::Constant(ref constant)) => {
-                    emit_load_constant(buffer, constant, dst)
+    // Returns Ok((index, load_store_insts)), where `index(dst)` is the actual
+    // address after evaluation, and load_store_insts is the load and store
+    // instructions to be used for the place.
+    let emit_evaluate_place_address =
+        |buffer: &mut String,
+         place: &Place,
+         dst: &str,
+         scratch: &[&str]|
+         -> Result<(isize, Option<[&'static str; 2]>), fmt::Error> {
+            let local = place.local;
+            let Some(ref projection) = place.projection else {
+                panic!("cannot evaluate address of local place");
+            };
+            let ptr_ty = body.slots[local.0];
+            let pointee_ty = match compilation_unit.types[ptr_ty.0] {
+                TypeKind::Pointer { pointee, .. } => pointee,
+                _ => unreachable!("cannot deref a non-pointer"),
+            };
+            let load_store_insts =
+                compilation_unit.load_store_instructions(pointee_ty, state);
+            let pointee_layout = compilation_unit.layout(pointee_ty, state);
+            let pointee_size = pointee_layout.size();
+            // Load local into dst, then either const-index using immediate,
+            // or add then 0-index
+            emit_load_local(buffer, local, dst)?;
+            match (projection, 0) {
+                (PlaceProjection::Deref, index)
+                | (&PlaceProjection::DerefConstantIndex(index), _) => {
+                    let index = index * pointee_size as isize;
+                    Ok((index, load_store_insts))
                 }
-                Value::Operand(Operand::Copy(Place {
-                    local,
-                    projection: None,
-                })) => {
-                    let Some([load_inst, _]) = compilation_unit
-                        .load_store_instructions(body.slots[local.0], state)
-                    else {
-                        return Ok(());
-                    };
-                    let offset = slot_locations[local.0];
-                    writeln!(buffer, "{load_inst} {dst}, {offset}(sp)")
+                (&PlaceProjection::DerefIndex(index_local), _) => {
+                    let (&index_dst, scratch) = scratch
+                        .split_first()
+                        .expect("have enough scratch registers");
+                    emit_load_local(buffer, index_local, index_dst)?;
+                    assert!(
+                        pointee_size.is_power_of_two(),
+                        "cannot load non-power-of-two-sized type using \
+                         indexing"
+                    );
+                    let shift_amt = pointee_size.ilog2();
+                    if shift_amt != 0 {
+                        writeln!(
+                            buffer,
+                            "slli {index_dst}, {index_dst}, {shift_amt}"
+                        )?;
+                    }
+                    writeln!(buffer, "add {dst}, {dst}, {index_dst}")?;
+                    Ok((0, load_store_insts))
                 }
-
-                Value::Operand(Operand::Copy(Place {
-                    local,
-                    projection: Some(ref projection),
-                })) => todo!(),
-                Value::BinaryOp(_, _, _) => todo!(),
-                Value::Not(_) => todo!(),
-                Value::Negate(_) => todo!(),
             }
         };
+
+    let emit_evaluate_operand = |buffer: &mut String,
+                                 operand: &Operand,
+                                 dst: &str,
+                                 scratch: &[&str]|
+     -> fmt::Result {
+        match *operand {
+            (Operand::Constant(ref constant)) => {
+                emit_load_constant(buffer, constant, dst)
+            }
+            (Operand::Copy(Place { local, projection: None })) => {
+                emit_load_local(buffer, local, dst)
+            }
+            (Operand::Copy(ref place)) => {
+                let (index, load_store_insts) =
+                    emit_evaluate_place_address(buffer, place, dst, scratch)?;
+                let Some([load_inst, _]) = load_store_insts else {
+                    panic!("maybe allow ZST indexing?");
+                };
+                writeln!(buffer, "{load_inst} {dst}, {index}({dst})")
+            }
+        }
+    };
+
+    let emit_evaluate_value = |buffer: &mut String,
+                               value: &Value,
+                               dst: &str,
+                               scratch: &[&str]|
+     -> fmt::Result {
+        match value {
+            Value::Operand(operand) => {
+                emit_evaluate_operand(buffer, operand, dst, scratch)
+            }
+            Value::BinaryOp(op, lhs, rhs) => {
+                emit_evaluate_operand(buffer, lhs, dst, scratch)?;
+                let (&rhs_dst, scratch) = scratch
+                    .split_first()
+                    .expect("have enough scratch registers");
+                emit_evaluate_operand(buffer, rhs, rhs_dst, scratch)?;
+                match op {
+                    crate::ast::BinaryOp::Arithmetic(op) => {
+                        let op_inst = arithmetic_op_instruction(op);
+                        writeln!(buffer, "{op_inst} {dst}, {dst}, {rhs_dst}")
+                    }
+                    crate::ast::BinaryOp::Comparison(_) => todo!(),
+                    crate::ast::BinaryOp::Assignment
+                    | crate::ast::BinaryOp::RangeOp { .. } => unreachable!(
+                        "assignment and range ops should not be in MIR"
+                    ),
+                }
+            }
+            Value::Not(_) => todo!(),
+            Value::Negate(_) => todo!(),
+        }
+    };
 
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
@@ -325,8 +424,10 @@ fn emit_function(
                 continue;
             };
 
-            // Load value into t0
-            emit_evaluate_value(buffer, value, "t0")?;
+            let (&dst, scratch) = TEMP_REGS.split_first().unwrap();
+
+            // Load value into dst
+            emit_evaluate_value(buffer, value, dst, scratch)?;
 
             // Write value into place
             match place.projection {
@@ -340,9 +441,18 @@ fn emit_function(
                         return Ok(());
                     };
                     let offset = slot_locations[place.local.0];
-                    writeln!(buffer, "{store_inst} t0, {offset}(sp)")?;
+                    writeln!(buffer, "{store_inst} {dst}, {offset}(sp)")?;
                 }
-                Some(_) => todo!(),
+                Some(_) => {
+                    let (index, load_store_insts) =
+                        emit_evaluate_place_address(
+                            buffer, place, dst, scratch,
+                        )?;
+                    let Some([load_inst, _]) = load_store_insts else {
+                        panic!("maybe allow ZST indexing?");
+                    };
+                    writeln!(buffer, "{load_inst} {dst}, {index}({dst})")?;
+                }
             }
         }
 
@@ -357,7 +467,8 @@ fn emit_function(
             }
             Terminator::Return => emit_return(buffer)?,
             Terminator::SwitchBool { ref scrutinee, true_dst, false_dst } => {
-                emit_load_local_or_constant(buffer, scrutinee, "t0")?;
+                let dst = TEMP_REGS[0];
+                emit_load_local_or_constant(buffer, scrutinee, dst)?;
                 let next_emitted_block =
                     basic_block_order.get(idx + 1).copied();
 
@@ -365,21 +476,21 @@ fn emit_function(
                     // jump to false if false, else fallthrough
                     writeln!(
                         buffer,
-                        "beqz t0, {}",
+                        "beqz {dst}, {}",
                         basic_block_label!(false_dst)
                     )?;
                 } else if next_emitted_block == Some(false_dst) {
                     // jump to true if true, else fallthrough
                     writeln!(
                         buffer,
-                        "bnez t0, {}",
+                        "bnez {dst}, {}",
                         basic_block_label!(true_dst)
                     )?;
                 } else {
                     // jump to false if false, else jump to true
                     writeln!(
                         buffer,
-                        "beqz t0, {}",
+                        "beqz {dst}, {}",
                         basic_block_label!(false_dst)
                     )?;
                     writeln!(buffer, "j {}", basic_block_label!(true_dst))?;
@@ -392,8 +503,10 @@ fn emit_function(
                 equal_dst,
                 greater_dst,
             } => {
-                emit_load_local_or_constant(buffer, lhs, "t0")?;
-                emit_load_local_or_constant(buffer, rhs, "t1")?;
+                let lhs_dst = TEMP_REGS[0];
+                let rhs_dst = TEMP_REGS[1];
+                emit_load_local_or_constant(buffer, lhs, lhs_dst)?;
+                emit_load_local_or_constant(buffer, rhs, rhs_dst)?;
                 let signed = match *lhs {
                     LocalOrConstant::Local(slot) => {
                         match compilation_unit.types[body.slots[slot.0].0] {
@@ -430,24 +543,24 @@ fn emit_function(
                 if signed {
                     writeln!(
                         buffer,
-                        "blt t0, t1, {}",
+                        "blt {lhs_dst}, {rhs_dst}, {}",
                         basic_block_label!(less_dst)
                     )?;
                     writeln!(
                         buffer,
-                        "bgt t0, t1, {}",
+                        "bgt {lhs_dst}, {rhs_dst}, {}",
                         basic_block_label!(greater_dst)
                     )?;
                     writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
                 } else {
                     writeln!(
                         buffer,
-                        "bltu t0, t1, {}",
+                        "bltu {lhs_dst}, {rhs_dst}, {}",
                         basic_block_label!(less_dst)
                     )?;
                     writeln!(
                         buffer,
-                        "bgtu t0, t1, {}",
+                        "bgtu {lhs_dst}, {rhs_dst}, {}",
                         basic_block_label!(greater_dst)
                     )?;
                     writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
