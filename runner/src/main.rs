@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use tempfile::TempDir;
 
@@ -9,19 +13,13 @@ fn usage() -> ! {
 }
 
 fn compile_file(
-    filename: &str, build_dir: &TempDir,
+    filename: &Path, build_dir: &TempDir,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let asm_file =
         tempfile::Builder::new().suffix(".s").tempfile_in(build_dir.path())?;
     let compile_command_status = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "compiler",
-            "--",
-            filename,
-            asm_file.path().to_str().expect("UTF-8 path"),
-        ])
+        .args(["run", "--bin", "compiler", "--"])
+        .args([filename, asm_file.path()])
         .status()?;
     if compile_command_status.success() {
         Ok(asm_file.keep()?.1)
@@ -46,20 +44,31 @@ fn main() {
         usage()
     }
 
+    let mut source_files = vec![];
+    let mut c_source_files = vec![];
+
+    for file in args {
+        let file = PathBuf::from(file);
+        match file.extension().and_then(OsStr::to_str) {
+            Some("src") => source_files.push(file),
+            Some("c") => c_source_files.push(file),
+            _ => panic!(
+                "source files should end in .src, C helper files should end \
+                 in .c"
+            ),
+        }
+    }
+
     let build_dir =
         tempfile::tempdir().expect("Failed to create build directory");
-    let asm_files: Vec<_> = args
+    let asm_files: Vec<_> = source_files
         .iter()
         .map(|filename| compile_file(filename, &build_dir))
-        .collect();
+        .collect::<Result<_, _>>()
+        .expect("failed to compile source files");
     // If any files failed to compile, pass them through directly to gcc
-    let compiler_files: Vec<&_> = asm_files
-        .iter()
-        .zip(args.iter())
-        .map(|(asm_file, input_file)| {
-            asm_file.as_ref().map_or(input_file.as_ref(), PathBuf::as_path)
-        })
-        .collect();
+    let compiler_files: Vec<&_> =
+        asm_files.iter().chain(&c_source_files).collect();
 
     let executable_file = build_dir.path().join("main");
 
