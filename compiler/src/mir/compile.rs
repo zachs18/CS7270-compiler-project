@@ -190,45 +190,10 @@ fn emit_function(
     }
 
     // Determine the order to emit basic blocks.
-    // We try to optimize such that a target block will be immediately after a
-    // source block as often as possible, so branches are not needed.
-    // For bodies without cycles, this will be a topological sort.
-    let basic_block_order: Vec<BasicBlockIdx> = {
-        let mut emit_order = IndexSet::new();
-        let mut queue: VecDeque<BasicBlockIdx> =
-            VecDeque::from([BasicBlockIdx(0)]);
-
-        // Basically breadth-first search
-
-        while let Some(block_idx) = queue.pop_front() {
-            if !emit_order.insert(block_idx) {
-                continue;
-            }
-            match body.basic_blocks[block_idx.0].terminator {
-                Terminator::Call { target, .. }
-                | Terminator::Goto { target } => queue.push_back(target),
-                Terminator::SwitchBool { true_dst, false_dst, .. } => {
-                    queue.push_back(true_dst);
-                    queue.push_back(false_dst);
-                }
-                Terminator::SwitchCmp {
-                    less_dst,
-                    equal_dst,
-                    greater_dst,
-                    ..
-                } => {
-                    queue.push_back(less_dst);
-                    queue.push_back(equal_dst);
-                    queue.push_back(greater_dst);
-                }
-                Terminator::Return => {}
-                Terminator::Unreachable => {}
-                Terminator::Error => {}
-            }
-        }
-
-        emit_order.into_iter().collect()
-    };
+    // This is optimized by the SortBlocks optimization, so this vec is just for
+    // clarity.
+    let basic_block_order: Vec<BasicBlockIdx> =
+        (0..body.basic_blocks.len()).map(BasicBlockIdx).collect();
 
     // Function epilogue
     let emit_return = |buffer: &mut String| -> fmt::Result {
