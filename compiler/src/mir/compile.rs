@@ -266,7 +266,7 @@ fn emit_function(
         };
 
     // Store register into local slot (register should be a temporary register)
-    let emit_load_local =
+    let emit_store_local =
         |buffer: &mut String, local: SlotIdx, src: &str| -> fmt::Result {
             use fmt::Write;
             let Some([_load_inst, store_inst]) = compilation_unit
