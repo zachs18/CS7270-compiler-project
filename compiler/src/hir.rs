@@ -713,6 +713,9 @@ impl<'a> HirCtx<'a> {
     /// * `iN + iN -> iN` (or `uN`)
     /// * `ptr + iN -> ptr` (or `uN`)
     /// * `iN + ptr -> ptr` (or `uN`)
+    ///
+    /// TODO: For now, we disable pointer addition because it's not implemented
+    /// correctly. You can use `&ptr[index]` instead.
     fn constrain_add(
         &mut self, lhs: TypeIdx, rhs: TypeIdx, result: TypeIdx,
     ) -> bool {
@@ -720,6 +723,12 @@ impl<'a> HirCtx<'a> {
         let lhs = TypeIdx(self.ty_ctx.constraints.root_of(lhs.0));
         let rhs = TypeIdx(self.ty_ctx.constraints.root_of(rhs.0));
         let result = TypeIdx(self.ty_ctx.constraints.root_of(result.0));
+
+        changed |= self.constrain_integer(lhs);
+        changed |= self.constrain_eq(lhs, rhs);
+        changed |= self.constrain_eq(lhs, result);
+
+        #[cfg(any())]
         if lhs.0 == rhs.0
             || (lhs.is_integer(self).unwrap_or(false)
                 && rhs.is_integer(self).unwrap_or(false))
@@ -758,10 +767,20 @@ impl<'a> HirCtx<'a> {
     /// * `ptr - isize -> ptr`
     /// * `ptr - usize -> ptr`
     /// * `ptr - ptr -> isize` (same pointee)
+    ///
+    /// TODO: For now, we disable pointer addition because it's not implemented
+    /// correctly. You can use `&ptr[-index]` instead; subtracting pointers from
+    /// pointers is not currently possible.
     fn constrain_subtract(
         &mut self, lhs: TypeIdx, rhs: TypeIdx, result: TypeIdx,
     ) -> bool {
         let mut changed = false;
+
+        changed |= self.constrain_integer(lhs);
+        changed |= self.constrain_eq(lhs, rhs);
+        changed |= self.constrain_eq(lhs, result);
+
+        #[cfg(any())]
         if lhs.is_integer(self).unwrap_or(false) {
             // Can only subtract integer from integer
             // Only same-type integers can be subtracted.
