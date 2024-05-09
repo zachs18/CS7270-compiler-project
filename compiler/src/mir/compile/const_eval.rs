@@ -1,7 +1,7 @@
 use either::Either;
 
 use crate::{
-    hir::{PointerSized, TypeKind},
+    hir::PointerSized,
     mir::{
         BasicBlockIdx, BasicOperation, Body, CompilationUnit, Constant,
         Operand, Place, SlotIdx, Terminator, TypeIdx, Value,
@@ -24,8 +24,10 @@ impl ConstEvalValue {
                 Self::Integer { value, signed, bits }
             }
             Constant::Bool(value) => Self::Bool { value },
-            Constant::Tuple(_) => todo!(),
-            Constant::ItemAddress(_) => todo!(),
+            Constant::Tuple(_) => unimplemented!("tuples in const-eval"),
+            Constant::ItemAddress(_) => {
+                unimplemented!("item addresses in const-eval")
+            }
         }
     }
 }
@@ -88,9 +90,9 @@ impl CompilationUnit {
                                 let slot = assert_local_place(src);
                                 slots[slot.0].clone()
                             }
-                            Value::BinaryOp(_, _, _) => todo!(),
-                            Value::Not(_) => todo!(),
-                            Value::Negate(_) => todo!(),
+                            _ => unimplemented!(
+                                "complicated expressions in const-eval"
+                            ),
                         };
                         slots[dst.0] = value;
                     }
@@ -130,18 +132,14 @@ impl CompilationUnit {
                         ),
                     }
                 }
-                Terminator::SwitchCmp {
-                    lhs,
-                    rhs,
-                    less_dst,
-                    equal_dst,
-                    greater_dst,
-                } => todo!(),
                 Terminator::Return => break 'eval_loop,
                 Terminator::Unreachable => {
                     unreachable!("entered unreachable code during const-eval")
                 }
-                Terminator::Call { func, args, return_destination, target } => {
+                Terminator::SwitchCmp { .. } => {
+                    unimplemented!("conditional const-eval")
+                }
+                Terminator::Call { .. } => {
                     unimplemented!(
                         "cannot currently call functions in const-eval"
                     )

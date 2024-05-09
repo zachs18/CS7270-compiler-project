@@ -179,7 +179,7 @@ fn lex_until_closing_delimiter(
                 tokens.push(TokenTree::Label(Label {
                     label: std::str::from_utf8(&src[start..idx])
                         .expect("valid UTF-8 source"),
-                    span: Some((start..idx).into()),
+                    span: (start..idx).into(),
                 }));
                 prev_byte_was_punct = false;
             }

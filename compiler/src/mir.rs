@@ -349,7 +349,6 @@ impl CompilationUnit {
         &self, name: &Symbol, ty: TypeIdx, kind: &ItemKind,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        let mutable_str = |m| if m { "mut " } else { "" };
         match *kind {
             ItemKind::DeclaredExternStatic { mutability, .. } => {
                 writeln!(
@@ -1311,7 +1310,10 @@ fn lower_value_expression(
                     compilation_unit,
                 )
             }
-            crate::ast::BinaryOp::RangeOp { end_inclusive } => todo!(),
+            crate::ast::BinaryOp::RangeOp { .. } => unreachable!(
+                "range ops are only part of syntax of for loops and should \
+                 not be in HIR"
+            ),
         },
         hir::ExpressionKind::If { condition, then_block, else_block } => {
             // bb0: {
@@ -1449,7 +1451,7 @@ fn lower_value_expression(
             let base_tykind = &compilation_unit.types[base_ty.0];
 
             match base_tykind {
-                TypeKind::Pointer { mutability, pointee } => {
+                TypeKind::Pointer { .. } => {
                     // Evaluate pointer into new slot, then evalute index into
                     // new slot, then Index into pointer
                     let ptr_slot = body.new_slot(base_ty);

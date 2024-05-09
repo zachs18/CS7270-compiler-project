@@ -2009,7 +2009,10 @@ impl TypeCheck for Expression {
                         changed |= ctx
                             .constrain_eq(self.type_, ctx.ty_ctx.bool_type());
                     }
-                    BinaryOp::RangeOp { .. } => todo!(),
+                    BinaryOp::RangeOp { .. } => unreachable!(
+                        "range ops are only part of the syntax of for-loops \
+                         and should not reach HIR"
+                    ),
                 }
                 changed
             }

@@ -11,20 +11,6 @@ pub enum TokenTree {
 }
 
 impl TokenTree {
-    pub fn as_ident(&self) -> Option<&Ident> {
-        match self {
-            TokenTree::Ident(ident) => Some(ident),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_group(&self) -> Option<&Group> {
-        match self {
-            TokenTree::Group(group) => Some(group),
-            _ => None,
-        }
-    }
-
     pub(crate) fn as_punct(&self) -> Option<&Punct> {
         match self {
             TokenTree::Punct(punct) => Some(punct),
@@ -39,7 +25,7 @@ impl TokenTree {
             TokenTree::Integer(integer) => integer.span,
             TokenTree::Punct(punct) => punct.span,
             TokenTree::StringLiteral(string) => string.span,
-            TokenTree::Label(label) => label.span,
+            TokenTree::Label(label) => Some(label.span),
         }
     }
 }
@@ -98,13 +84,7 @@ impl std::hash::Hash for Ident {
 #[derive(Debug, Clone, Copy)]
 pub struct Label {
     pub label: &'static str,
-    pub span: Option<Span>,
-}
-
-impl Label {
-    pub fn new_unspanned(label: &'static str) -> Self {
-        Self { label, span: None }
-    }
+    pub span: Span,
 }
 
 impl PartialEq for Label {
@@ -160,14 +140,6 @@ impl Delimiter {
             Delimiter::Parenthesis => '(',
             Delimiter::Brace => '{',
             Delimiter::Bracket => '[',
-        }
-    }
-
-    pub fn closing(self) -> char {
-        match self {
-            Delimiter::Parenthesis => ')',
-            Delimiter::Brace => '}',
-            Delimiter::Bracket => ']',
         }
     }
 }
