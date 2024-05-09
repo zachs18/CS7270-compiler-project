@@ -125,18 +125,21 @@ fn emit_static(
     Ok(())
 }
 
-fn arithmetic_op_instruction(op: &ArithmeticOp) -> &str {
-    match op {
-        ArithmeticOp::Add => "add",
-        ArithmeticOp::Subtract => "sub",
-        ArithmeticOp::Multiply => todo!(),
-        ArithmeticOp::Divide => todo!(),
-        ArithmeticOp::Modulo => todo!(),
-        ArithmeticOp::And | ArithmeticOp::BitAnd => "and",
-        ArithmeticOp::Or | ArithmeticOp::BitOr => "or",
-        ArithmeticOp::BitXor => "xor",
-        ArithmeticOp::LeftShift => todo!(),
-        ArithmeticOp::RightShift => todo!(),
+fn arithmetic_op_instruction(op: &ArithmeticOp, signed: bool) -> &str {
+    match (signed, op) {
+        (_, ArithmeticOp::Add) => "add",
+        (_, ArithmeticOp::Subtract) => "sub",
+        (_, ArithmeticOp::Multiply) => "mul",
+        (false, ArithmeticOp::Divide) => "divu",
+        (true, ArithmeticOp::Divide) => "div",
+        (false, ArithmeticOp::Modulo) => "remu",
+        (true, ArithmeticOp::Modulo) => "rem",
+        (_, ArithmeticOp::And | ArithmeticOp::BitAnd) => "and",
+        (_, ArithmeticOp::Or | ArithmeticOp::BitOr) => "or",
+        (_, ArithmeticOp::BitXor) => "xor",
+        (_, ArithmeticOp::LeftShift) => "sll",
+        (false, ArithmeticOp::RightShift) => "srl",
+        (true, ArithmeticOp::RightShift) => "sra",
     }
 }
 
@@ -405,7 +408,43 @@ fn emit_function(
                 emit_evaluate_operand(buffer, rhs, rhs_dst, scratch)?;
                 match op {
                     crate::ast::BinaryOp::Arithmetic(op) => {
-                        let op_inst = arithmetic_op_instruction(op);
+                        // Try to find out the signedness of the operands, but
+                        // don't error if we can't find out, just default to
+                        // unsigned.
+                        let signed = match lhs {
+                            Operand::Copy(place) => 'place_signeness: {
+                                let ty = match place {
+                                    Place { local, projection: None } => {
+                                        &compilation_unit.types
+                                            [body.slots[local.0].0]
+                                    }
+                                    Place { local, projection: Some(_) } => {
+                                        match compilation_unit.types
+                                            [body.slots[local.0].0]
+                                        {
+                                            TypeKind::Pointer {
+                                                pointee,
+                                                ..
+                                            } => {
+                                                &compilation_unit.types
+                                                    [pointee.0]
+                                            }
+                                            _ => break 'place_signeness false,
+                                        }
+                                    }
+                                };
+                                match ty {
+                                    &TypeKind::Integer { signed, .. } => signed,
+                                    _ => false,
+                                }
+                            }
+                            &Operand::Constant(Constant::Integer {
+                                signed,
+                                ..
+                            }) => signed,
+                            Operand::Constant(_) => false,
+                        };
+                        let op_inst = arithmetic_op_instruction(op, signed);
                         writeln!(buffer, "{op_inst} {dst}, {dst}, {rhs_dst}")
                     }
                     crate::ast::BinaryOp::Comparison(_) => todo!(),
