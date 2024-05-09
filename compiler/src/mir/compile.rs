@@ -448,14 +448,23 @@ fn emit_function(
                     writeln!(buffer, "{store_inst} {dst}, {offset}(sp)")?;
                 }
                 Some(_) => {
+                    let (place_address_dst, scratch) = scratch
+                        .split_first()
+                        .expect("have enough scratch regsiters");
                     let (index, load_store_insts) =
                         emit_evaluate_place_address(
-                            buffer, place, dst, scratch,
+                            buffer,
+                            place,
+                            place_address_dst,
+                            scratch,
                         )?;
-                    let Some([load_inst, _]) = load_store_insts else {
+                    let Some([_, store_inst]) = load_store_insts else {
                         panic!("maybe allow ZST indexing?");
                     };
-                    writeln!(buffer, "{load_inst} {dst}, {index}({dst})")?;
+                    writeln!(
+                        buffer,
+                        "{store_inst} {dst}, {index}({place_address_dst})"
+                    )?;
                 }
             }
         }
