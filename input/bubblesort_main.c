@@ -26,9 +26,9 @@ int main() {
 
     for (size_t i = 0; i < 24; ++i) {
         if (array[i] == expected[i])
-            printf("array[%d] is correct (%u)\n", i, expected[i]);
+            printf("array[%lu] is correct (%u)\n", i, expected[i]);
         else
-            printf("array[%d] is NOT correct (expected %u, found %u)\n", i,
+            printf("array[%lu] is NOT correct (expected %u, found %u)\n", i,
                    expected[i], array[i]);
     }
 }

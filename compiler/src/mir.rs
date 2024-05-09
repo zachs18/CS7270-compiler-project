@@ -1202,8 +1202,39 @@ fn lower_value_expression(
         hir::ExpressionKind::Array(_) => todo!(),
         hir::ExpressionKind::Tuple(_) => todo!(),
         hir::ExpressionKind::UnaryOp { op, operand } => match op {
-            hir::UnaryOp::Not => todo!(),
-            hir::UnaryOp::Neg => todo!(),
+            hir::UnaryOp::Not | hir::UnaryOp::Neg => {
+                let operand_slot = body
+                    .new_slot(compilation_unit.lower_type(operand.type_, ctx));
+                let not_block = body.temp_block();
+                let initial_block = lower_value_expression(
+                    operand,
+                    ctx,
+                    operand_slot,
+                    body,
+                    value_scope,
+                    label_scope,
+                    not_block.as_basic_block_idx(),
+                    compilation_unit,
+                );
+
+                let value_constructor = match op {
+                    UnaryOp::Not => Value::Not,
+                    UnaryOp::Neg => Value::Negate,
+                    _ => unreachable!(),
+                };
+
+                not_block.update(
+                    body,
+                    vec![BasicOperation::Assign(
+                        Place::from(dst_slot),
+                        value_constructor(Box::new(Value::Operand(
+                            Operand::Copy(Place::from(operand_slot)),
+                        ))),
+                    )],
+                    Terminator::Goto { target: next_block },
+                );
+                initial_block
+            }
             hir::UnaryOp::AddrOf { mutable } => {
                 todo!("need to lower operand as a place expression")
             }
@@ -2114,8 +2145,8 @@ impl fmt::Display for Value {
                      sugar and should not exist in MIR"
                 ),
             },
-            Value::Not(_) => todo!(),
-            Value::Negate(_) => todo!(),
+            Value::Not(inner) => write!(f, "Not({inner})"),
+            Value::Negate(inner) => write!(f, "Negate({inner})"),
         }
     }
 }

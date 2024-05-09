@@ -7,7 +7,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct UnionFind {
     /// If `parents[i] == i`, then `i` is a root
     ///

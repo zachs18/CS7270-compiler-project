@@ -294,12 +294,14 @@ impl<'a> HirCtx<'a> {
 
     /// Returns `None` if the given `TypeIdx` is not a concrete type.
     pub fn resolve_ty(&self, ty: TypeIdx) -> Option<&TypeKind> {
-        self.ty_ctx.substitutions.get(ty.0).and_then(|e| e.as_ref().left())
+        let idx = self.ty_ctx.constraints.root_of(ty.0);
+        self.ty_ctx.substitutions.get(idx).and_then(|e| e.as_ref().left())
     }
 
     /// Returns `None` if the given `MutIdx` is not a concrete mutability.
     pub fn resolve_mut(&self, mutability: MutIdx) -> Option<Mutability> {
-        self.ty_ctx.mut_substitutions.get(mutability.0).copied().flatten()
+        let idx = self.ty_ctx.mut_constraints.root_of(mutability.0);
+        self.ty_ctx.mut_substitutions.get(idx).copied().flatten()
     }
 
     fn new_parent(parent: &'a mut HirCtx<'_>) -> Self {
@@ -337,6 +339,7 @@ impl<'a> HirCtx<'a> {
         if t1.0 == t2.0 {
             return false;
         }
+        #[allow(unstable_name_collisions)] // that's the point
         let [t1k, t2k] =
             self.ty_ctx.substitutions.get_many_mut([t1.0, t2.0]).unwrap();
         match (&mut *t1k, &mut *t2k) {
@@ -672,7 +675,7 @@ impl<'a> HirCtx<'a> {
                 // self.constrain_integer(type_)
             }
             Pattern::Ident { ident, .. } => {
-                self.value_scope.insert_noreplace(*ident, type_);
+                self.register_local(*ident, type_);
                 false
             }
             Pattern::Alt(_) => unimplemented!("alt patterns not implemented"),
@@ -898,7 +901,8 @@ pub enum TypeKind {
 
 impl TypeIdx {
     fn is_concrete(&self, ctx: &HirCtx) -> bool {
-        match ctx.ty_ctx.substitutions[self.0] {
+        let idx = ctx.ty_ctx.constraints.root_of(self.0);
+        match ctx.ty_ctx.substitutions[idx] {
             Either::Right(_) => false,
             Either::Left(ref type_kind) => match type_kind {
                 TypeKind::Pointer { pointee, .. } => pointee.is_concrete(ctx),
@@ -921,7 +925,8 @@ impl TypeIdx {
     }
 
     fn is_integer(&self, ctx: &HirCtx) -> Option<bool> {
-        match ctx.ty_ctx.substitutions[self.0] {
+        let idx = ctx.ty_ctx.constraints.root_of(self.0);
+        match ctx.ty_ctx.substitutions[idx] {
             Either::Right(TypeVarKind::Integer) => Some(true),
             Either::Right(TypeVarKind::Normal) => None,
             Either::Left(TypeKind::Integer { .. }) => Some(true),
@@ -930,7 +935,8 @@ impl TypeIdx {
     }
 
     fn is_pointer(&self, ctx: &HirCtx) -> Option<bool> {
-        match ctx.ty_ctx.substitutions[self.0] {
+        let idx = ctx.ty_ctx.constraints.root_of(self.0);
+        match ctx.ty_ctx.substitutions[idx] {
             Either::Right(TypeVarKind::Integer) => Some(false),
             Either::Right(TypeVarKind::Normal) => None,
             Either::Left(TypeKind::Pointer { .. }) => Some(true),
@@ -1184,7 +1190,7 @@ pub fn lower_ast_to_hir(ast: Vec<ast::Item>) -> (Vec<Item>, HirCtx<'static>) {
             continue;
         }
 
-        // Resolve unknown type vars to i32
+        // Resolve unknown type vars to ()
         for t in &mut ctx.ty_ctx.substitutions {
             if matches!(t, Either::Right(TypeVarKind::Normal)) {
                 *t = Either::Left(TypeKind::Tuple(EMPTY_TYPE_LIST.clone()));
@@ -1850,7 +1856,8 @@ impl TypeCheck for FnItem {
 
 impl TypeCheck for StaticItem {
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool {
-        let mut changed = self.initializer.type_check(ctx);
+        let mut ctx = HirCtx::new_parent(ctx);
+        let mut changed = self.initializer.type_check(&mut ctx);
         if let Some(expr) = &self.initializer {
             changed |= ctx.constrain_eq(self.type_, expr.type_);
         }
@@ -1913,9 +1920,15 @@ impl TypeCheck for Expression {
             ExpressionKind::UnaryOp { op, operand } => {
                 let mut changed = operand.type_check(ctx);
                 match op {
-                    UnaryOp::Not => todo!("bool or integer"),
+                    UnaryOp::Not => {
+                        changed |= ctx.constrain_eq(operand.type_, self.type_);
+                        eprintln!(
+                            "TODO: restrict Not operand to bool or integer"
+                        );
+                    }
                     UnaryOp::Neg => {
                         changed |= ctx.constrain_integer(operand.type_);
+                        changed |= ctx.constrain_eq(operand.type_, self.type_);
                     }
                     UnaryOp::AddrOf { mutable } => {
                         log::warn!("TODO: allow coercing from *mut to *const?");
@@ -2143,7 +2156,10 @@ impl TypeCheck for Expression {
     fn assert_concrete(&self, ctx: &HirCtx) {
         assert!(
             self.type_.is_concrete(ctx),
-            "expression's type is not concrete: {self:?}"
+            "expression's type is not concrete: {:?}: {self:#?}, {:#?}, {:?}",
+            self.type_,
+            ctx.ty_ctx.substitutions.iter().enumerate().collect::<Vec<_>>(),
+            ctx.ty_ctx.constraints,
         );
         match &self.kind {
             ExpressionKind::Ident(..)
@@ -2187,8 +2203,9 @@ impl TypeCheck for Expression {
 
 impl TypeCheck for Block {
     fn type_check(&mut self, ctx: &mut HirCtx) -> bool {
-        let stmts_changed = self.statements.type_check(ctx);
-        let tail_changed = self.tail.type_check(ctx);
+        let mut ctx = HirCtx::new_parent(ctx);
+        let stmts_changed = self.statements.type_check(&mut ctx);
+        let tail_changed = self.tail.type_check(&mut ctx);
         stmts_changed || tail_changed
     }
 

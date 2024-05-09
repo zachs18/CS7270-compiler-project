@@ -1151,10 +1151,10 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::BinaryOp(
                     BinaryOp::Arithmetic(ArithmeticOp::Add) | BinaryOp::Arithmetic(ArithmeticOp::Subtract),
                     other,
-                    Operand::Constant(Constant::Integer{ value:0, .. }),
+                    Operand::Constant(Constant::Integer{ value: 0, .. }),
                 ) | Value::BinaryOp(
                     BinaryOp::Arithmetic(ArithmeticOp::Add),
-                    Operand::Constant(Constant::Integer{ value:0, .. }),
+                    Operand::Constant(Constant::Integer{ value: 0, .. }),
                     other,
                 ) => {
                     *value = Value::Operand(other.clone());
@@ -1165,13 +1165,20 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::Negate(inner) => {
                     let inner_changed = constant_propagate_value(inner);
                     match **inner {
+                        // -constant -> constant
                         Value::Operand(Operand::Constant(Constant::Integer { value: inner, signed, bits })) => {
                             *value = Value::from(Constant::Integer{ value: u128::wrapping_neg(inner), signed, bits });
                             true
                         }
+                        // --value -> value
                         Value::Negate(ref inner) => {
-                            *value = (**inner).clone();
-                            true
+                            match **inner {
+                                Value::Negate(ref inner) => {
+                                    *value = (**inner).clone();
+                                    true
+                                }
+                                _ => inner_changed,
+                            }
                         }
                         _ => inner_changed
                     }
@@ -1179,17 +1186,25 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 Value::Not(inner) => {
                     let inner_changed = constant_propagate_value(inner);
                     match **inner {
+                        // -constant -> constant
                         Value::Operand(Operand::Constant(Constant::Integer { value: inner, signed, bits })) => {
                             *value = Value::from(Constant::Integer{ value: !inner, signed, bits });
                             true
                         }
+                        // -constant -> constant
                         Value::Operand(Operand::Constant(Constant::Bool(inner))) => {
                             *value = Value::from(Constant::Bool(!inner));
                             true
                         }
+                        // !!value -> value
                         Value::Not(ref inner) => {
-                            *value = (**inner).clone();
-                            true
+                            match **inner {
+                                Value::Not(ref inner) => {
+                                    *value = (**inner).clone();
+                                    true
+                                }
+                                _ => inner_changed,
+                            }
                         }
                         _ => inner_changed
                     }
