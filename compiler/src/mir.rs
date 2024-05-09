@@ -981,15 +981,11 @@ fn lower_pattern(
                 terminator: Terminator::Goto { target: next_block },
             })
         }
-        hir::Pattern::Array(patterns) => {
-            todo!()
-        }
-        hir::Pattern::Tuple(_) => todo!(),
-        hir::Pattern::Alt(_) => {
-            unimplemented!("alt-patterns are not implemented")
-        }
+        hir::Pattern::Array(_) => unimplemented!("array-patterns"),
+        hir::Pattern::Tuple(_) => unimplemented!("tuple-patterns"),
+        hir::Pattern::Alt(_) => unimplemented!("alt-patterns"),
         hir::Pattern::Integer(_) | hir::Pattern::Range { .. } => {
-            unimplemented!("non-exhaustive patterns are not implemented")
+            unimplemented!("non-exhaustive patterns")
         }
     }
 }

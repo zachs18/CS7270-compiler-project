@@ -8,11 +8,10 @@ use core::fmt;
 use std::{
     alloc::Layout,
     borrow::Cow,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
 };
 
 use either::Either;
-use indexmap::IndexSet;
 use zachs18_stdx::OptionExt;
 
 use crate::{
@@ -333,9 +332,8 @@ fn emit_function(
                     Ok((index, load_store_insts))
                 }
                 (&PlaceProjection::DerefIndex(index_local), _) => {
-                    let (&index_dst, scratch) = scratch
-                        .split_first()
-                        .expect("have enough scratch registers");
+                    let &index_dst =
+                        scratch.first().expect("have enough scratch registers");
                     emit_load_local(buffer, index_local, index_dst)?;
                     assert!(
                         pointee_size.is_power_of_two(),
@@ -361,13 +359,13 @@ fn emit_function(
                                  scratch: &[&str]|
      -> fmt::Result {
         match *operand {
-            (Operand::Constant(ref constant)) => {
+            Operand::Constant(ref constant) => {
                 emit_load_constant(buffer, constant, dst)
             }
-            (Operand::Copy(Place { local, projection: None })) => {
+            Operand::Copy(Place { local, projection: None }) => {
                 emit_load_local(buffer, local, dst)
             }
-            (Operand::Copy(ref place)) => {
+            Operand::Copy(ref place) => {
                 let (index, load_store_insts) =
                     emit_evaluate_place_address(buffer, place, dst, scratch)?;
                 let Some([load_inst, _]) = load_store_insts else {
@@ -416,15 +414,7 @@ fn emit_function(
                                scratch: &[&str]|
      -> fmt::Result {
         match place.projection {
-            None => {
-                let Some([_, store_inst]) = compilation_unit
-                    .load_store_instructions(body.slots[place.local.0], state)
-                else {
-                    return Ok(());
-                };
-                let offset = slot_locations[place.local.0];
-                writeln!(buffer, "{store_inst} {src}, {offset}(sp)")
-            }
+            None => emit_store_local(buffer, place.local, src),
             Some(_) => {
                 let (place_address_dst, scratch) = scratch
                     .split_first()
@@ -766,7 +756,6 @@ impl CompilationUnit {
     pub fn compile(&self, state: CompilationState) -> String {
         let mut buffer = String::new();
 
-        let mut local_symbols: HashMap<usize, String> = HashMap::new();
         let mut local_idx = 0;
         let mut new_local_symbol = || {
             let idx = local_idx;
@@ -774,7 +763,7 @@ impl CompilationUnit {
             format!(".L{idx}")
         };
 
-        let mut global_symbols: Vec<Cow<str>> =
+        let global_symbols: Vec<Cow<str>> =
             self.items
                 .iter()
                 .map(|item| {
