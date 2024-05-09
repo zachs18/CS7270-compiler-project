@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+use get_many_mut::GetManyMutExt;
 use itertools::Itertools;
 use petgraph::graphmap::{DiGraphMap, GraphMap};
 
@@ -171,6 +172,7 @@ impl MirOptimization for CombineBlocks {
                 changed = true;
 
                 // Merge dst into src
+                #[allow(unstable_name_collisions)] // that's the point
                 let [src_block, dst_block] =
                     body.basic_blocks.get_many_mut([src.0, dst.0]).unwrap();
                 src_block.operations.append(&mut dst_block.operations);

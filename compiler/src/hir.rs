@@ -24,6 +24,7 @@ use std::{
 };
 
 use either::Either;
+use get_many_mut::GetManyMutExt;
 use once_cell::sync::Lazy;
 
 use crate::{
@@ -627,6 +628,7 @@ impl<'a> HirCtx<'a> {
         if m1.0 == m2.0 {
             return false;
         }
+        #[allow(unstable_name_collisions)] // that's the point
         let [m1k, m2k] =
             self.ty_ctx.mut_substitutions.get_many_mut([m1.0, m2.0]).unwrap();
         if let (Some(m1m), Some(m2m)) = (*m1k, *m2k) {

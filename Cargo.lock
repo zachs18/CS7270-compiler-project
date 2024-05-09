@@ -114,6 +114,7 @@ dependencies = [
  "copy-range",
  "either",
  "env_logger",
+ "get-many-mut",
  "indexmap",
  "itertools",
  "log",
@@ -217,6 +218,12 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
 ]
+
+[[package]]
+name = "get-many-mut"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e1027d8e4b47b5b11577479d544a4054c29e692115c5c6e782c29f37066a2f7"
 
 [[package]]
 name = "getrandom"

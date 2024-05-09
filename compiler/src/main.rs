@@ -1,5 +1,3 @@
-#![feature(get_many_mut)]
-
 use std::{io::Write, process::ExitCode};
 
 use token::TokenTree;
