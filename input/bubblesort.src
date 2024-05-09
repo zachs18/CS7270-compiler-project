@@ -1,5 +1,5 @@
-extern fn bubble_sort(arr: *mut u32, len: usize) {
-    if len > 0 {
+extern fn bubble_sort(arr: *mut u32, mut len: usize) {
+    while len > 1 {
         for i in 1..len {
             if arr[i-1] > arr[i] {
                 let tmp = arr[i];
@@ -7,5 +7,6 @@ extern fn bubble_sort(arr: *mut u32, len: usize) {
                 arr[i-1] = tmp;
             }
         }
+        len = len - 1;
     }
 }
