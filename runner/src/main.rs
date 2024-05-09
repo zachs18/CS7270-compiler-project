@@ -79,6 +79,7 @@ fn main() {
         .arg("-o")
         .arg(executable_file.as_path())
         .arg("-g")
+        .arg("-static")
         .args(compiler_files)
         .status()
         .expect("failed to compile executable");
