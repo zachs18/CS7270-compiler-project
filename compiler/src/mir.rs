@@ -482,8 +482,10 @@ impl CompilationUnit {
     fn lower_mutability(
         &mut self, mutability: hir::MutIdx, ctx: &HirCtx,
     ) -> Mutability {
-        ctx.resolve_mut(mutability)
-            .expect("types should all be resolved after hir type checking")
+        ctx.resolve_mut(mutability).unwrap_or_else(|| {
+            log::error!("types should all be resolved after hir type checking");
+            Mutability::Mutable
+        })
     }
 
     fn lower_type(&mut self, ty: hir::TypeIdx, ctx: &HirCtx) -> TypeIdx {
@@ -1194,8 +1196,8 @@ fn lower_value_expression(
             };
             body.insert_block(block)
         }
-        hir::ExpressionKind::Array(_) => todo!(),
-        hir::ExpressionKind::Tuple(_) => todo!(),
+        hir::ExpressionKind::Array(_) => unimplemented!("arrays"),
+        hir::ExpressionKind::Tuple(_) => unimplemented!("tuples"),
         hir::ExpressionKind::UnaryOp { op, operand } => match op {
             hir::UnaryOp::Not | hir::UnaryOp::Neg => {
                 let operand_slot = body
@@ -1230,8 +1232,231 @@ fn lower_value_expression(
                 );
                 initial_block
             }
-            hir::UnaryOp::AddrOf { mutable } => {
-                todo!("need to lower operand as a place expression")
+            &hir::UnaryOp::AddrOf { mutable } => {
+                log::warn!("TODO: refactor this into a separate function");
+                let addr_of_mutability = Mutability::from_bool(mutable);
+                match &operand.kind {
+                    hir::ExpressionKind::Ident(symbol) => {
+                        match value_scope.lookup(symbol) {
+                            Some(&(local_mutability, local)) => {
+                                assert!(
+                                    local_mutability >= addr_of_mutability,
+                                    "cannot take the mutable address of \
+                                     non-mut local {symbol} (TODO: \
+                                     type-checking should have caught this)"
+                                );
+                                body.insert_block(BasicBlock {
+                                    operations: vec![BasicOperation::Assign(
+                                        Place::from(dst_slot),
+                                        Value::AddressOf(
+                                            Mutability::from_bool(mutable),
+                                            Place::from(local),
+                                        ),
+                                    )],
+                                    terminator: Terminator::Goto {
+                                        target: next_block,
+                                    },
+                                })
+                            }
+                            None => match compilation_unit.globals.get(symbol) {
+                                Some((item, type_idx)) => {
+                                    match compilation_unit.items[item.0] {
+                                        Either::Left(
+                                            ItemKind::DeclaredExternFn {
+                                                ..
+                                            }
+                                            | ItemKind::DefinedExternFn {
+                                                ..
+                                            }
+                                            | ItemKind::LocalFn { .. },
+                                        )
+                                        | Either::Right(ItemKindStub::Fn) => {
+                                            panic!(
+                                                "cannot take address of \
+                                                 function {symbol}"
+                                            )
+                                        }
+                                        Either::Left(
+                                            ItemKind::StringLiteral { .. },
+                                        ) => {
+                                            panic!(
+                                                "cannot take address of \
+                                                 string literal"
+                                            )
+                                        }
+                                        Either::Left(
+                                            ItemKind::LocalStatic {
+                                                mutability: static_mutability,
+                                                ..
+                                            }
+                                            | ItemKind::DefinedExternStatic {
+                                                mutability: static_mutability,
+                                                ..
+                                            }
+                                            | ItemKind::DeclaredExternStatic {
+                                                mutability: static_mutability,
+                                                ..
+                                            },
+                                        )
+                                        | Either::Right(
+                                            ItemKindStub::Static {
+                                                mutability: static_mutability,
+                                            },
+                                        ) => {
+                                            assert!(
+                                                static_mutability
+                                                    >= addr_of_mutability,
+                                                "cannot take the mutable \
+                                                 address of non-mut local \
+                                                 {symbol} (TODO: \
+                                                 type-checking should have \
+                                                 caught this)"
+                                            );
+                                            let ops = vec![
+                                                BasicOperation::Assign(
+                                                    Place::from(dst_slot),
+                                                    Value::Operand(Operand::Constant(
+                                                        Constant::ItemAddress(*symbol),
+                                                    )),
+                                                ),
+                                            ];
+                                            body.insert_block(BasicBlock {
+                                                operations: ops,
+                                                terminator: Terminator::Goto {
+                                                    target: next_block,
+                                                },
+                                            })
+                                        }
+                                    }
+                                }
+                                None => unreachable!(
+                                    "unresolved symbol {symbol} \
+                                     (type-checking should have caught this)"
+                                ),
+                            },
+                        }
+                    }
+                    hir::ExpressionKind::Array(_) => {
+                        unimplemented!("address of array")
+                    }
+                    hir::ExpressionKind::Tuple(_) => {
+                        unimplemented!("address of tuple")
+                    }
+                    hir::ExpressionKind::Index { base, index } => {
+                        let index_slot = body.new_slot(
+                            compilation_unit.lower_type(index.type_, ctx),
+                        );
+
+                        let base_ty =
+                            compilation_unit.lower_type(base.type_, ctx);
+                        let base_tykind = &compilation_unit.types[base_ty.0];
+
+                        match base_tykind {
+                            TypeKind::Pointer { .. } => {
+                                // Evaluate pointer into new slot, then evaluate
+                                // index, then write addr of indexed place into
+                                // dst_slot
+                                let after_base_before_index_block =
+                                    body.temp_block();
+                                let ptr_slot = body.new_slot(base_ty);
+                                let base_initial_block = lower_value_expression(
+                                    base,
+                                    ctx,
+                                    ptr_slot,
+                                    body,
+                                    value_scope,
+                                    label_scope,
+                                    after_base_before_index_block
+                                        .as_basic_block_idx(),
+                                    compilation_unit,
+                                );
+                                let after_index_block = body.temp_block();
+                                let index_initial_block =
+                                    lower_value_expression(
+                                        index,
+                                        ctx,
+                                        index_slot,
+                                        body,
+                                        value_scope,
+                                        label_scope,
+                                        after_index_block.as_basic_block_idx(),
+                                        compilation_unit,
+                                    );
+                                after_base_before_index_block.update(
+                                    body,
+                                    vec![],
+                                    Terminator::Goto {
+                                        target: index_initial_block,
+                                    },
+                                );
+                                let ops = vec![BasicOperation::Assign(
+                                    Place { local: dst_slot, projection: None },
+                                    Value::AddressOf(
+                                        addr_of_mutability,
+                                        Place {
+                                            local: ptr_slot,
+                                            projection: Some(
+                                                PlaceProjection::DerefIndex(
+                                                    index_slot,
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                )];
+                                after_index_block.update(
+                                    body,
+                                    ops,
+                                    Terminator::Goto { target: next_block },
+                                );
+                                base_initial_block
+                            }
+                            TypeKind::Array { .. } => {
+                                unimplemented!("arrays not implemented")
+                            }
+                            TypeKind::Slice { .. } => {
+                                unimplemented!("slices not implemented")
+                            }
+                            TypeKind::Tuple(_) => {
+                                unimplemented!("tuples not implemented")
+                            }
+                            _ => unreachable!(
+                                "cannot index {base_ty:?} (TODO: \
+                                 type-checking should have caught this)"
+                            ),
+                        }
+                    }
+                    // &* cancels out
+                    hir::ExpressionKind::UnaryOp {
+                        op: UnaryOp::Deref,
+                        operand,
+                    } => {
+                        unimplemented!(
+                            "assignment to deref (For now, just do ptr[0] = \
+                             ...)"
+                        )
+                    }
+
+                    hir::ExpressionKind::Wildcard
+                    | hir::ExpressionKind::UnaryOp { .. }
+                    | hir::ExpressionKind::If { .. }
+                    | hir::ExpressionKind::Loop { .. }
+                    | hir::ExpressionKind::Block { .. }
+                    | hir::ExpressionKind::Match { .. }
+                    | hir::ExpressionKind::Call { .. }
+                    | hir::ExpressionKind::Continue { .. }
+                    | hir::ExpressionKind::Break { .. }
+                    | hir::ExpressionKind::Return { .. }
+                    | hir::ExpressionKind::Integer(_)
+                    | hir::ExpressionKind::StringLiteral(_)
+                    | hir::ExpressionKind::Bool(_)
+                    | hir::ExpressionKind::BinaryOp { .. } => {
+                        panic!(
+                            "can only take address of local variables, \
+                             statics, and pointer-based index expressions \
+                             items, not {operand:?}"
+                        )
+                    }
+                }
             }
             hir::UnaryOp::Deref => {
                 let operand_slot = body
@@ -1759,10 +1984,10 @@ fn lower_assignment_expression(
             }
         }
         hir::ExpressionKind::Array(_) => {
-            todo!("destructuring assignment of array")
+            unimplemented!("destructuring assignment of array")
         }
         hir::ExpressionKind::Tuple(_) => {
-            todo!("destructuring assignment of tuple")
+            unimplemented!("destructuring assignment of tuple")
         }
         hir::ExpressionKind::Index { base, index } => {
             let index_slot =
@@ -2114,6 +2339,7 @@ enum Value {
     BinaryOp(BinaryOp, Operand, Operand),
     Not(Box<Value>),
     Negate(Box<Value>),
+    AddressOf(Mutability, Place),
 }
 
 impl From<Operand> for Value {
@@ -2145,6 +2371,9 @@ impl fmt::Display for Value {
             },
             Value::Not(inner) => write!(f, "Not({inner})"),
             Value::Negate(inner) => write!(f, "Negate({inner})"),
+            Value::AddressOf(mutability, place) => {
+                write!(f, "&{mutability} {place}")
+            }
         }
     }
 }

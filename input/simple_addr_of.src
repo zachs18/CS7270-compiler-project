@@ -1,0 +1,14 @@
+extern fn printf(format: *const i8, ...) -> i32;
+
+static X: u32 = 4;
+static mut Y: u32 = 5;
+
+extern fn main() -> i32 {
+    let p = &X;
+    printf("*%p == %u\n", p, p[0]);
+    let q = &mut Y;
+    printf("*%p == %u\n", q, q[0]);
+    Y = 42;
+    printf("*%p == %u\n", q, q[0]);
+    0
+}

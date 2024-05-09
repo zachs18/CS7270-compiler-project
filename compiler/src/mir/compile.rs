@@ -112,9 +112,9 @@ fn emit_static(
         writeln!(buffer, ".bss {name}, {len}, {alignment}", len = value.len())?;
     } else {
         if mutable {
-            writeln!(buffer, ".section .rodata.{name}")?;
-        } else {
             writeln!(buffer, ".section .data.{name}")?;
+        } else {
+            writeln!(buffer, ".section .rodata.{name}")?;
         }
         writeln!(buffer, ".balign {alignment}")?;
         writeln!(buffer, "{name}:")?;
@@ -422,6 +422,14 @@ fn emit_function(
             Value::Negate(inner) => {
                 emit_evaluate_value(buffer, inner, dst, scratch)?;
                 writeln!(buffer, "neg {dst}, {dst}")
+            }
+            Value::AddressOf(_, place) => {
+                let (offset, _) =
+                    emit_evaluate_place_address(buffer, place, dst, scratch)?;
+                if offset != 0 {
+                    writeln!(buffer, "addi {dst}, {dst}, {offset}")?;
+                }
+                Ok(())
             }
         }
     };

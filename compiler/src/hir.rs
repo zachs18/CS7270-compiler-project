@@ -64,11 +64,17 @@ enum TypeVarKind {
     Integer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mutability {
     Constant,
     Mutable,
 }
+
+#[test]
+fn mutability_order() {
+    assert!(Mutability::Mutable > Mutability::Constant);
+}
+
 impl Mutability {
     pub fn from_bool(mutable: bool) -> Mutability {
         match mutable {

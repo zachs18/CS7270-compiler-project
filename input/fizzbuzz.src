@@ -11,3 +11,9 @@ extern fn fizzbuzz(x: i32) {
         printf("%d\n", x);
     }
 }
+
+extern fn main() {
+    for i in 1..=32 {
+        fizzbuzz(i);
+    }
+}

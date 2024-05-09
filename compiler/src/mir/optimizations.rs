@@ -432,6 +432,10 @@ fn replace_copy_in_value(
         }
         Value::Not(value) => replace_copy_in_value(value, slot, new_operand),
         Value::Negate(value) => replace_copy_in_value(value, slot, new_operand),
+        Value::AddressOf(_, _place) => {
+            eprintln!("TODO: replace copy in place addrof");
+            false
+        }
     }
 }
 
@@ -704,6 +708,9 @@ fn find_reads_in_value_read(slots: &mut [bool], value: &Value) {
         }
         Value::Not(value) => find_reads_in_value_read(slots, value),
         Value::Negate(value) => find_reads_in_value_read(slots, value),
+        Value::AddressOf(_, place) => {
+            find_reads_in_place_evaluation(slots, place)
+        }
     }
 }
 
@@ -716,36 +723,36 @@ fn find_reads_in_operand_read(slots: &mut [bool], operand: &Operand) {
     }
 }
 
+/// For each slot that is read when this `Place` is evaluated, but not read or
+/// written (e.g. in an `Value::AddressOf`), set the corresponding element of
+/// `slots` to `true`.
+fn find_reads_in_place_evaluation(slots: &mut [bool], place: &Place) {
+    if let Some(projection) = &place.projection {
+        // If this is a deref place, then it's not actually
+        // writing to the place's local, it's *reading* it.
+        slots[place.local.0] = true;
+        match projection {
+            PlaceProjection::DerefIndex(index_slot) => {
+                slots[index_slot.0] = true;
+            }
+            PlaceProjection::DerefConstantIndex(_) | PlaceProjection::Deref => {
+            }
+        }
+    }
+}
+
 /// For each slot that is read when this `Place` is evaluated in a
 /// `Value::Operand(Operand::Place(..))`, set the corresponding element of
 /// `slots` to `true`.
 fn find_reads_in_place_read(slots: &mut [bool], place: &Place) {
+    find_reads_in_place_evaluation(slots, place);
     slots[place.local.0] = true;
-    if let Some(PlaceProjection::DerefIndex(index_slot)) = place.projection {
-        slots[index_slot.0] = true;
-    }
 }
 
 /// For each slot that is read when this `Place` is evaluated as the assignee,
 /// set the corresponding element of `slots` to `true`.
 fn find_reads_in_place_write(slots: &mut [bool], place: &Place) {
-    match place.projection {
-        None => {}
-        Some(
-            PlaceProjection::DerefConstantIndex(..) | PlaceProjection::Deref,
-        ) => {
-            // If this is a deref place, then it's not actually
-            // writing to the place's local, it's *reading* it.
-            slots[place.local.0] = true;
-        }
-        Some(PlaceProjection::DerefIndex(index_slot)) => {
-            // If this is a deref-index place, then it's not actually
-            // writing to the place's local, it's *reading* it. and also reading
-            // the index slot.
-            slots[place.local.0] = true;
-            slots[index_slot.0] = true
-        }
-    }
+    find_reads_in_place_evaluation(slots, place);
 }
 
 impl MirOptimization for DeadLocalWriteElimination {
@@ -865,6 +872,7 @@ fn find_slot_uses_in_value(slots: &mut [bool], value: &Value) {
         Value::Not(value) | Value::Negate(value) => {
             find_slot_uses_in_value(slots, value)
         }
+        Value::AddressOf(_, place) => find_slot_uses_in_place(slots, place),
     }
 }
 
@@ -957,6 +965,7 @@ fn replace_slot_uses_in_value(
         Value::Not(value) | Value::Negate(value) => {
             replace_slot_uses_in_value(slots, value)
         }
+        Value::AddressOf(_, place) => replace_slot_uses_in_place(slots, place),
     }
 }
 
@@ -1162,6 +1171,7 @@ fn constant_propagate_value(value: &mut Value) -> bool {
                 }
                 Value::Operand(_) => false,
                 Value::BinaryOp(_, _, _) => false,
+                Value::AddressOf(_, _) => false,
                 Value::Negate(inner) => {
                     let inner_changed = constant_propagate_value(inner);
                     match **inner {
@@ -1438,7 +1448,8 @@ impl MirOptimization for RedundantSwitchElimination {
                                 std::cmp::Ordering::Greater => greater_dst,
                             }
                         } else {
-                            todo!("signed SwitchCmp const opt")
+                            eprintln!("TODO: signed SwitchCmp const opt");
+                            return changed;
                         };
                         block.terminator = Terminator::Goto { target: next_bb };
                         changed = true;
