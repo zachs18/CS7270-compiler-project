@@ -8,6 +8,7 @@ use core::fmt;
 use std::{
     alloc::Layout,
     borrow::Cow,
+    cell::Cell,
     collections::{HashMap, HashSet},
 };
 
@@ -376,11 +377,19 @@ fn emit_function(
         }
     };
 
+    // Need some way to make `emit_evaluate_value` recursive. Could make it a
+    // macro, but meh.
+    #[allow(clippy::type_complexity)]
+    let emit_evaluate_value_impl: Cell<
+        Option<&dyn Fn(&mut String, &Value, &str, &[&str]) -> fmt::Result>,
+    > = Cell::new(None);
+
     let emit_evaluate_value = |buffer: &mut String,
                                value: &Value,
                                dst: &str,
                                scratch: &[&str]|
      -> fmt::Result {
+        let emit_evaluate_value = emit_evaluate_value_impl.get().unwrap();
         match value {
             Value::Operand(operand) => {
                 emit_evaluate_operand(buffer, operand, dst, scratch)
@@ -403,10 +412,18 @@ fn emit_function(
                     ),
                 }
             }
-            Value::Not(_) => todo!(),
-            Value::Negate(_) => todo!(),
+            Value::Not(inner) => {
+                emit_evaluate_value(buffer, inner, dst, scratch)?;
+                writeln!(buffer, "not {dst}, {dst}")
+            }
+            Value::Negate(inner) => {
+                emit_evaluate_value(buffer, inner, dst, scratch)?;
+                writeln!(buffer, "neg {dst}, {dst}")
+            }
         }
     };
+
+    emit_evaluate_value_impl.set(Some(&emit_evaluate_value));
 
     let emit_write_to_place = |buffer: &mut String,
                                place: &Place,
