@@ -417,12 +417,16 @@ fn emit_function(
             continue;
         }
         let label = basic_block_label!(block_idx);
+        writeln!(buffer, ".local {label}")?;
         writeln!(buffer, "{label}:")?;
         let block = &body.basic_blocks[block_idx.0];
         for op in &block.operations {
             let BasicOperation::Assign(place, value) = op else {
                 continue;
             };
+
+            // Add a comment saying what op this is
+            writeln!(buffer, "# {}", op)?;
 
             let (&dst, scratch) = TEMP_REGS.split_first().unwrap();
 
@@ -455,6 +459,9 @@ fn emit_function(
                 }
             }
         }
+
+        // Add a comment saying what terminator this is
+        writeln!(buffer, "# {}", block.terminator)?;
 
         match block.terminator {
             Terminator::Goto { target } => {
