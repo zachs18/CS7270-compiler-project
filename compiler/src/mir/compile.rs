@@ -1,8 +1,8 @@
-//! Compiling MIR down to RV32I-ISA, ILP32-ABI assembly.
+//! Compiling MIR down to RISCV-V assembly.
 //!
 //! Note that we don't support floating-point numbers, so keeping track of the
-//! ABI and ISA support for them is just so we produce object-files that work
-//! with other software.
+//! ABI and ISA support for them is not necessary, except perhaps for
+//! future-proofing.
 
 use core::fmt;
 use std::{
@@ -31,6 +31,7 @@ mod const_eval;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompilationState {
+    #[allow(unused)]
     isa: ISA,
     abi: ABI,
 }
@@ -73,6 +74,7 @@ impl CompilationState {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum ISA {
     RV32I,
@@ -81,6 +83,7 @@ pub enum ISA {
     RV64G,
 }
 
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum ABI {
     ILP32,
