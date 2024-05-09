@@ -1,3 +1,7 @@
-extern fn hello(x: u32) -> u32;
+extern fn printf(format: *const i8, ...) -> i32;
 
-extern fn world(x: u32) -> u32 { hello(x) }
+extern fn main() -> i32 {
+    printf("Hello, world!\n");
+    printf("4 + 5 = %d\n", 4 + 5);
+    0
+}

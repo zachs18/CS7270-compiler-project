@@ -1990,7 +1990,7 @@ impl fmt::Display for Terminator {
             Self::Call { func, args, return_destination, target } => {
                 write!(
                     f,
-                    "{} = {}({}) -> bb{}",
+                    "{} = call {}({}) -> bb{}",
                     return_destination,
                     func,
                     FmtSlice::new(args, ", "),

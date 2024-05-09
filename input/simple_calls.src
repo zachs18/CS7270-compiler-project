@@ -1,0 +1,14 @@
+extern fn printf(format: *const i8, ...) -> i32;
+
+fn fibonacci(n: u32) -> u32 {
+    if n < 2 {
+        1
+    } else {
+        fibonacci(n - 1) + fibonacci(n - 2)
+    }
+}
+
+extern fn main() -> i32 {
+    printf("fibonacci(10) = %d\n", fibonacci(10));
+    0
+}

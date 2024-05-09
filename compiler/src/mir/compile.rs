@@ -7,6 +7,7 @@
 use core::fmt;
 use std::{
     alloc::Layout,
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
 };
 
@@ -16,7 +17,7 @@ use zachs18_stdx::OptionExt;
 
 use crate::{
     ast::ArithmeticOp,
-    hir::PointerSized,
+    hir::{self, PointerSized},
     mir::{
         BasicBlockIdx, BasicOperation, CompilationUnit, Constant, ItemKind,
         LocalOrConstant, Operand, Place, PlaceProjection, SlotIdx, Terminator,
@@ -24,7 +25,7 @@ use crate::{
     },
 };
 
-use super::{Body, TypeIdx, TypeKind};
+use super::{Body, ItemIdx, TypeIdx, TypeKind};
 
 mod const_eval;
 
@@ -91,6 +92,8 @@ pub enum ABI {
 }
 
 const TEMP_REGS: [&str; 7] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"];
+const ARG_REGS: [&str; 8] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+const RETURN_REG: &str = "a0";
 
 fn emit_static(
     buffer: &mut String, compilation_unit: &CompilationUnit,
@@ -138,6 +141,8 @@ fn emit_function(
     buffer: &mut String, compilation_unit: &CompilationUnit,
     state: &CompilationState, body: &super::Body, global: bool, name: &str,
     new_local_symbol: &mut (impl ?Sized + FnMut() -> String),
+    globals: &HashMap<hir::Symbol, (ItemIdx, TypeIdx)>,
+    global_symbols: &[Cow<'_, str>],
 ) -> fmt::Result {
     use std::fmt::Write;
     if global {
@@ -175,10 +180,14 @@ fn emit_function(
     // Function prologue:
     // 1. Allocate stack frame
     // 2. If not leaf, write return address
-    // 3. Copy arguments into stack
+    // 3. Copy arguments into stack slots
+
+    // Allocate stack frame
     if let stack_size @ 1.. = stack_layout.size() {
         writeln!(buffer, "addi sp, sp, -{}", stack_size)?;
     }
+
+    // Write return address
     if !is_leaf {
         writeln!(
             buffer,
@@ -187,23 +196,16 @@ fn emit_function(
         )?;
     }
 
-    let mut arg_registers_used = 0;
-    let mut next_arg_register = || {
-        if arg_registers_used >= 8 {
-            unimplemented!("more than 8 function arguments");
-        }
-        let argreg = arg_registers_used;
-        arg_registers_used += 1;
-        format!("a{argreg}")
-    };
-
+    // Copy arguments to slots
+    let mut arg_registers = ARG_REGS.iter().copied();
+    #[allow(clippy::needless_range_loop)]
     for arg in 1..=body.argc {
         let Some([_load_inst, store_inst]) =
             compilation_unit.load_store_instructions(body.slots[arg], state)
         else {
             continue;
         };
-        let reg = next_arg_register();
+        let reg = arg_registers.next().expect("have <= 8 arguments");
         let offset = slot_locations[arg];
         writeln!(buffer, "{store_inst} {reg}, {offset}(sp)")?;
     }
@@ -228,7 +230,7 @@ fn emit_function(
             compilation_unit.load_store_instructions(body.slots[0], state)
         {
             let offset = slot_locations[0];
-            writeln!(buffer, "{load_inst} a0, {offset}(sp)")?;
+            writeln!(buffer, "{load_inst} {RETURN_REG}, {offset}(sp)")?;
         }
         if let stack_size @ 1.. = stack_layout.size() {
             writeln!(buffer, "addi sp, sp, {}", stack_size)?;
@@ -260,7 +262,13 @@ fn emit_function(
                 Constant::Bool(value) => {
                     writeln!(buffer, "li {dst}, {}", value as u8)
                 }
-                Constant::ItemAddress(_) => todo!(),
+                Constant::ItemAddress(symbol) => {
+                    let (global_idx, _) =
+                        globals.get(&symbol).expect("symbol exists");
+                    let symbol = &global_symbols[global_idx.0];
+                    writeln!(buffer, "1: auipc {dst}, %pcrel_hi({symbol})")?;
+                    writeln!(buffer, "addi {dst}, {dst}, %pcrel_lo(1b)")
+                }
                 Constant::Tuple(_) => unimplemented!("tuples"),
             }
         };
@@ -402,6 +410,42 @@ fn emit_function(
         }
     };
 
+    let emit_write_to_place = |buffer: &mut String,
+                               place: &Place,
+                               src: &str,
+                               scratch: &[&str]|
+     -> fmt::Result {
+        match place.projection {
+            None => {
+                let Some([_, store_inst]) = compilation_unit
+                    .load_store_instructions(body.slots[place.local.0], state)
+                else {
+                    return Ok(());
+                };
+                let offset = slot_locations[place.local.0];
+                writeln!(buffer, "{store_inst} {src}, {offset}(sp)")
+            }
+            Some(_) => {
+                let (place_address_dst, scratch) = scratch
+                    .split_first()
+                    .expect("have enough scratch regsiters");
+                let (index, load_store_insts) = emit_evaluate_place_address(
+                    buffer,
+                    place,
+                    place_address_dst,
+                    scratch,
+                )?;
+                let Some([_, store_inst]) = load_store_insts else {
+                    panic!("maybe allow ZST indexing?");
+                };
+                writeln!(
+                    buffer,
+                    "{store_inst} {src}, {index}({place_address_dst})"
+                )
+            }
+        }
+    };
+
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
         ($block_idx:expr) => {
@@ -434,39 +478,7 @@ fn emit_function(
             emit_evaluate_value(buffer, value, dst, scratch)?;
 
             // Write value into place
-            match place.projection {
-                None => {
-                    let Some([_, store_inst]) = compilation_unit
-                        .load_store_instructions(
-                            body.slots[place.local.0],
-                            state,
-                        )
-                    else {
-                        return Ok(());
-                    };
-                    let offset = slot_locations[place.local.0];
-                    writeln!(buffer, "{store_inst} {dst}, {offset}(sp)")?;
-                }
-                Some(_) => {
-                    let (place_address_dst, scratch) = scratch
-                        .split_first()
-                        .expect("have enough scratch regsiters");
-                    let (index, load_store_insts) =
-                        emit_evaluate_place_address(
-                            buffer,
-                            place,
-                            place_address_dst,
-                            scratch,
-                        )?;
-                    let Some([_, store_inst]) = load_store_insts else {
-                        panic!("maybe allow ZST indexing?");
-                    };
-                    writeln!(
-                        buffer,
-                        "{store_inst} {dst}, {index}({place_address_dst})"
-                    )?;
-                }
-            }
+            emit_write_to_place(buffer, place, dst, scratch)?;
         }
 
         // Add a comment saying what terminator this is
@@ -543,17 +555,22 @@ fn emit_function(
                     less_dst == equal_dst,
                     equal_dst == greater_dst,
                 ) {
-                    (true, true, true)
-                    | (true, true, false)
-                    | (false, true, true)
-                    | (true, false, true) => todo!(),
+                    (true, true, true) => todo!(),
                     // == or !=
                     (true, false, false) => {
                         todo!()
                     }
+                    // <= or >
                     (false, true, false) => todo!(),
+                    // < or >=
                     (false, false, true) => todo!(),
+                    // three-way cmp
                     (false, false, false) => todo!(),
+                    (true, true, false)
+                    | (false, true, true)
+                    | (true, false, true) => {
+                        unreachable!("transitivity of equality")
+                    }
                 }
 
                 if signed {
@@ -589,9 +606,56 @@ fn emit_function(
                 ref return_destination,
                 target,
             } => {
-                todo!()
+                // Emit evaluating the func, and pre-compile the function call
+                // itself that will happen after loading the arguments into
+                // a0..a7.
+                let (&fn_ptr_reg, scratch) = TEMP_REGS
+                    .split_first()
+                    .expect("have enough scratch registers");
+                let fn_call_asm = match func {
+                    Value::Operand(Operand::Constant(
+                        Constant::ItemAddress(item),
+                    )) => {
+                        // Emit calling a fn directly
+                        let (global_idx, _) =
+                            globals.get(item).expect("symbol exists");
+                        let symbol = &global_symbols[global_idx.0];
+                        format!("call {symbol}@plt")
+                    }
+                    func => {
+                        // Emit calling a fn pointer
+                        emit_evaluate_value(buffer, func, fn_ptr_reg, scratch)?;
+                        format!("jalr {fn_ptr_reg}")
+                    }
+                };
+
+                // Emit evaluating the arguments
+                #[allow(clippy::needless_range_loop)]
+                for (arg, argreg) in std::iter::zip(args, ARG_REGS) {
+                    eprintln!("TODO: handle ZST arguments");
+                    emit_evaluate_value(buffer, arg, argreg, scratch)?;
+                }
+
+                // Emit calling the func
+                writeln!(buffer, "{fn_call_asm}")?;
+
+                // Emit writing the return value to the return place
+                emit_write_to_place(
+                    buffer,
+                    return_destination,
+                    RETURN_REG,
+                    &TEMP_REGS,
+                )?;
+
+                // Emit goto target
+                if basic_block_order
+                    .get(idx + 1)
+                    .is_none_or(|next_basic_block| *next_basic_block != target)
+                {
+                    writeln!(buffer, "j {}", basic_block_label!(target))?;
+                }
             }
-            Terminator::Error => todo!(),
+            Terminator::Error => unreachable!(),
         }
     }
 
@@ -632,7 +696,8 @@ impl CompilationUnit {
             }
             TypeKind::Slice { .. } => unimplemented!("slice types"),
             TypeKind::Function { .. } => {
-                unimplemented!("function pointers")
+                eprintln!("TODO: handle function pointers better");
+                state.pointer_layout()
             }
         }
     }
@@ -649,13 +714,13 @@ impl CompilationUnit {
     fn load_store_instructions(
         &self, ty: TypeIdx, state: &CompilationState,
     ) -> Option<[&'static str; 2]> {
-        let (pointer_sized_suffix, pointer_bits) = match state.abi {
+        let (pointer_sized_insts, pointer_bits) = match state.abi {
             ABI::ILP32 | ABI::ILP32F | ABI::ILP32D => (["lw", "sw"], 32),
             ABI::LP64 | ABI::LP64F | ABI::LP64D => (["ld", "sd"], 64),
         };
         Some(match self.types[ty.0] {
             TypeKind::Integer { bits: Either::Right(PointerSized), .. }
-            | TypeKind::Pointer { .. } => pointer_sized_suffix,
+            | TypeKind::Pointer { .. } => pointer_sized_insts,
             TypeKind::Integer { bits: Either::Left(bits), signed } => {
                 match (signed, bits, pointer_bits) {
                     (_, 64, 64) => ["ld", "sd"],
@@ -675,6 +740,10 @@ impl CompilationUnit {
             }
             TypeKind::Bool => ["lbu", "sb"],
             TypeKind::Tuple(ref fields) if fields.len() == 0 => return None,
+            TypeKind::Function { .. } => {
+                eprintln!("TODO: handle function pointers better");
+                pointer_sized_insts
+            }
             ref ty => unimplemented!("loading {ty:?}"),
         })
     }
@@ -705,7 +774,29 @@ impl CompilationUnit {
             format!(".L{idx}")
         };
 
-        for (idx, item) in self.items.iter().enumerate() {
+        let mut global_symbols: Vec<Cow<str>> =
+            self.items
+                .iter()
+                .map(|item| {
+                    match item.as_ref().expect_left(
+                        "No stubs should be left after MIR lowering",
+                    ) {
+                        ItemKind::DeclaredExternStatic { name, .. }
+                        | ItemKind::DefinedExternStatic { name, .. }
+                        | ItemKind::DeclaredExternFn { name }
+                        | ItemKind::DefinedExternFn { name, .. } => {
+                            name.ident.into()
+                        }
+                        ItemKind::LocalStatic { .. }
+                        | ItemKind::LocalFn { .. }
+                        | ItemKind::StringLiteral { .. } => {
+                            new_local_symbol().into()
+                        }
+                    }
+                })
+                .collect();
+
+        for (item, symbol) in std::iter::zip(&self.items, &global_symbols) {
             match item
                 .as_ref()
                 .expect_left("No stubs should be left after MIR lowering")
@@ -717,10 +808,11 @@ impl CompilationUnit {
                     // No ASM generated
                 }
                 ItemKind::DefinedExternStatic {
-                    name,
                     mutability,
                     initializer,
-                } => {
+                    ..
+                }
+                | ItemKind::LocalStatic { mutability, initializer } => {
                     let value = self.const_eval(initializer, &state);
                     let layout = self.layout(initializer.slots[0], &state);
                     emit_static(
@@ -728,15 +820,14 @@ impl CompilationUnit {
                         self,
                         &state,
                         &value,
-                        true,
+                        false,
                         layout.align(),
                         mutability.is_mutable(),
-                        name.ident,
+                        symbol,
                     )
                     .expect("formatting should not fail");
                 }
                 ItemKind::StringLiteral { data } => {
-                    let local_symbol = new_local_symbol();
                     emit_static(
                         &mut buffer,
                         self,
@@ -745,53 +836,24 @@ impl CompilationUnit {
                         false,
                         1,
                         false,
-                        &local_symbol,
+                        symbol,
                     )
                     .expect("formatting should not fail");
-                    local_symbols.insert(idx, local_symbol);
                 }
-                ItemKind::LocalStatic { mutability, initializer } => {
-                    let value = self.const_eval(initializer, &state);
-                    let local_symbol = new_local_symbol();
-                    let layout = self.layout(initializer.slots[0], &state);
-                    emit_static(
-                        &mut buffer,
-                        self,
-                        &state,
-                        &value,
-                        false,
-                        layout.align(),
-                        mutability.is_mutable(),
-                        &local_symbol,
-                    )
-                    .expect("formatting should not fail");
-                    local_symbols.insert(idx, local_symbol);
-                }
-                ItemKind::DefinedExternFn { name, body } => {
+                ItemKind::DefinedExternFn { body, .. }
+                | ItemKind::LocalFn { body } => {
                     emit_function(
                         &mut buffer,
                         self,
                         &state,
                         body,
                         true,
-                        name.ident,
+                        symbol,
                         &mut new_local_symbol,
+                        &self.globals,
+                        &global_symbols,
                     )
                     .expect("formatting should not fail");
-                }
-                ItemKind::LocalFn { body } => {
-                    let local_symbol = new_local_symbol();
-                    emit_function(
-                        &mut buffer,
-                        self,
-                        &state,
-                        body,
-                        true,
-                        &local_symbol,
-                        &mut new_local_symbol,
-                    )
-                    .expect("formatting should not fail");
-                    local_symbols.insert(idx, local_symbol);
                 }
             }
         }
