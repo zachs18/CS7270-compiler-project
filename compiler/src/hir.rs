@@ -2005,6 +2005,7 @@ impl TypeCheck for Expression {
                         };
                     }
                     BinaryOp::Comparison(_) => {
+                        changed |= ctx.constrain_eq(lhs.type_, rhs.type_);
                         changed |= ctx
                             .constrain_eq(self.type_, ctx.ty_ctx.bool_type());
                     }
