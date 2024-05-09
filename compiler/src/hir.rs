@@ -1425,7 +1425,7 @@ impl Lower for ast::Expression {
                 let label = label
                     .map_or_else(BlockLabel::new_synthetic, BlockLabel::Label);
                 // 'label: loop {
-                //     if condition { break 'label } else body
+                //     if condition body else { break 'label }
                 // }
                 Expression::loop_expr(
                     Some(label),
@@ -1433,7 +1433,8 @@ impl Lower for ast::Expression {
                         statements: vec![Statement::Expression {
                             expression: Expression::if_block(
                                 condition.lower(ctx),
-                                Block {
+                                body.lower(ctx),
+                                Some(Block {
                                     statements: vec![],
                                     tail: Some(Box::new(
                                         Expression::break_expr(
@@ -1442,8 +1443,7 @@ impl Lower for ast::Expression {
                                             ctx,
                                         ),
                                     )),
-                                },
-                                Some(body.lower(ctx)),
+                                }),
                                 ctx,
                             ),
                             has_semicolon: false,
