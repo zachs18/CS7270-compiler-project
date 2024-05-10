@@ -143,6 +143,10 @@ fn lex_until_closing_delimiter(
                                 data.push(b'\n');
                                 idx += 1;
                             }
+                            Some(b'"') => {
+                                data.push(b'"');
+                                idx += 1;
+                            }
                             Some(&c) => panic!(
                                 "unrecognized escape sequence: \\{}",
                                 c as char
