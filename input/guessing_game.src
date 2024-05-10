@@ -1,0 +1,26 @@
+extern fn time(put_zero_here: usize) -> i32;
+extern fn srand(seed: i32);
+extern fn rand() -> i32;
+extern fn printf(format: *const i8, ...) -> i32;
+extern fn scanf(format: *const i8, ...) -> i32;
+
+static mut TEMP: i32 = 0;
+
+extern fn main() -> i32 {
+    srand(time(0));
+    let goal = rand() % 50;
+    printf("Guess a number between 0 and 50\n");
+    'guess_loop: loop {
+        printf("Guess? \n");
+        scanf("%d", &mut TEMP);
+        if TEMP == goal {
+            printf("Correct!\n");
+            break 'guess_loop;
+        } else if TEMP < goal {
+            printf("Too low!\n");
+        } else {
+            printf("Too high!\n");
+        }
+    }
+    0
+}

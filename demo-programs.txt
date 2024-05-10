@@ -26,3 +26,6 @@ cargo run --bin runner -- input/bubblesort.src input/bubblesort_main.c
 
 # For-loops, function calls, statics.
 cargo run --bin runner -- input/fibonacci.src input/fibonacci_main.src -- 3 4 5 6 7 8 9 10 11 12
+
+# Labeled loops, function calls, statics.
+cargo run --bin runner -- input/guessing_game.src
