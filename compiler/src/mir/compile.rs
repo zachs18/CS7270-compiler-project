@@ -316,7 +316,14 @@ fn emit_function(
          -> Result<(isize, Option<[&'static str; 2]>), fmt::Error> {
             let local = place.local;
             let Some(ref projection) = place.projection else {
-                panic!("cannot evaluate address of local place");
+                panic!("TODO: fix optimization passes to account for taking the address of locals");
+                let offset = slot_locations[place.local.0];
+                writeln!(buffer, "addi {dst}, sp, {offset}")?;
+                return Ok((
+                    0,
+                    compilation_unit
+                        .load_store_instructions(body.slots[local.0], state)
+                ));
             };
             let ptr_ty = body.slots[local.0];
             let pointee_ty = match compilation_unit.types[ptr_ty.0] {
@@ -911,8 +918,6 @@ impl CompilationUnit {
                 }
             }
         }
-
-        dbg!(&buffer);
 
         buffer
     }
