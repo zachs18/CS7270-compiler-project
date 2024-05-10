@@ -99,7 +99,6 @@ fn main() {
     qemu_command
         .args(["-L", "/usr/riscv64-linux-gnu/"])
         .arg(executable_file.as_path())
-        .arg("--")
         .args(program_args);
 
     let qemu_command_status =
