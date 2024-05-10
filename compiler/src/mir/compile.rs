@@ -109,18 +109,16 @@ fn emit_static(
     }
     let is_bss = value.iter().all(|&b| b == 0);
     if is_bss {
-        writeln!(buffer, ".bss {name}, {len}, {alignment}", len = value.len())?;
+        writeln!(buffer, ".section .bss.{name}")?;
+    } else if mutable {
+        writeln!(buffer, ".section .data.{name}")?;
     } else {
-        if mutable {
-            writeln!(buffer, ".section .data.{name}")?;
-        } else {
-            writeln!(buffer, ".section .rodata.{name}")?;
-        }
-        writeln!(buffer, ".balign {alignment}")?;
-        writeln!(buffer, "{name}:")?;
-        for b in value {
-            writeln!(buffer, ".byte {b}")?;
-        }
+        writeln!(buffer, ".section .rodata.{name}")?;
+    }
+    writeln!(buffer, ".balign {alignment}")?;
+    writeln!(buffer, "{name}:")?;
+    for b in value {
+        writeln!(buffer, ".byte {b}")?;
     }
     Ok(())
 }
