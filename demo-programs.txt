@@ -1,0 +1,28 @@
+# Shows that `static`s go into `.rodata`, and `static mut`s go into `.data` (except zero-init'd statics, which go in `.bss`).
+cargo run --bin compiler -- input/simple_static.src -
+
+# Simple program running
+cargo run --bin runner -- input/exit_with_argc_status.src
+cargo run --bin runner -- input/exit_with_argc_status.src hello
+cargo run --bin runner -- input/exit_with_argc_status.src hello world
+
+# Simple function calling
+cargo run --bin runner -- input/simple_call.src
+
+# Simple if statements
+cargo run --bin runner -- input/very_simple_if.src input/very_simple_if_main.c
+
+# Simple if statements
+cargo run --bin runner -- input/simple_if.src input/simple_if_main.c
+
+# Simple if statements, modulo, function calls, for-loop
+cargo run --bin runner -- input/fizzbuzz.src
+
+# Simple if statements, recursive function calls
+cargo run --bin runner -- input/recursive_calls.src
+
+# While loops, pointer indexing, assignment
+cargo run --bin runner -- input/bubblesort.src input/bubblesort_main.c
+
+# For-loops, function calls, statics.
+cargo run --bin runner -- input/fibonacci.src input/fibonacci_main.src -- 3 4 5 6 7 8 9 10 11 12

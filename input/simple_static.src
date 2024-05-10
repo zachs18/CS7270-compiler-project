@@ -1,4 +1,6 @@
-static X: u32 = 4;
-extern static Y: u32 = if true { 42 } else { 37 + 3 };
-extern static Z: u32;
-static A: u32 = 25 - 2;
+static X: u8 = 4;
+extern static Y: u8 = if true { 42 } else { 37 + 3 };
+extern static Z: u8;
+static mut A: u8 = 25 - 2;
+extern static mut B: u8 = if false { 4 * 2 - 1 } else { 3 * 8 * 2 };
+extern static mut C: u8;

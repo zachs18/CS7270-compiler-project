@@ -1,7 +1,16 @@
+extern fn printf(format: *const i8, ...) -> i32;
+
 static mut COUNTER: usize = 0;
 
 extern fn count() -> usize {
     let prev = COUNTER;
     COUNTER = prev + 1;
     prev
+}
+
+extern fn main() -> i32 {
+    printf("%lu\n", count());
+    printf("%lu\n", count());
+    printf("%lu\n", count());
+    0
 }
