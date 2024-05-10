@@ -75,6 +75,7 @@ fn main() {
 
     let executable_file = build_dir.path().join("main");
 
+    println!("Compiling program\n");
     let gcc_command_status = Command::new("riscv64-linux-gnu-gcc")
         .arg("-o")
         .arg(executable_file.as_path())
@@ -101,8 +102,9 @@ fn main() {
         .arg(executable_file.as_path())
         .args(program_args);
 
+    println!("Starting QEMU\n");
     let qemu_command_status =
         qemu_command.status().expect("failed to run executable");
 
-    println!("qemu returned {:?}", qemu_command_status.code());
+    println!("\nQEMU returned {:?}", qemu_command_status.code());
 }
