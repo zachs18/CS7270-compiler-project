@@ -1,0 +1,21 @@
+extern fn fibonacci(n: u64) -> u64;
+
+extern fn printf(format: *const i8, ...) -> i32;
+extern fn sscanf(str: *const i8, format: *const i8, ...) -> i32;
+
+// Cannot take the address of locals yet, so we use a mutable static instead.
+static mut TEMP: u64 = 0;
+
+extern fn main(argc: i32, argv: *const *const i8) -> i32 {
+    for i in 1..argc {
+        let arg = argv[i];
+        let ret = sscanf(arg, "%lu", &mut TEMP);
+        if ret != 1 {
+            printf("Failed to parse \"%s\" as number.\n", arg);
+        } else {
+            let value = fibonacci(TEMP);
+            printf("fibonacci(%lu) = %lu\n", TEMP, value);
+        }
+    }
+    0
+}
