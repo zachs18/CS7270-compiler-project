@@ -392,15 +392,15 @@ fn emit_function(
     // macro, but meh.
     #[allow(clippy::type_complexity)]
     let emit_evaluate_value_impl: Cell<
-        Option<&dyn Fn(&mut String, &Value, &str, &[&str]) -> fmt::Result>,
-    > = Cell::new(None);
+        &dyn Fn(&mut String, &Value, &str, &[&str]) -> fmt::Result,
+    > = Cell::new(&|_, _, _, _| unreachable!());
 
     let emit_evaluate_value = |buffer: &mut String,
                                value: &Value,
                                dst: &str,
                                scratch: &[&str]|
      -> fmt::Result {
-        let emit_evaluate_value = emit_evaluate_value_impl.get().unwrap();
+        let emit_evaluate_value = emit_evaluate_value_impl.get();
         match value {
             Value::Operand(operand) => {
                 emit_evaluate_operand(buffer, operand, dst, scratch)
@@ -478,7 +478,7 @@ fn emit_function(
         }
     };
 
-    emit_evaluate_value_impl.set(Some(&emit_evaluate_value));
+    emit_evaluate_value_impl.set(&emit_evaluate_value);
 
     let emit_write_to_place = |buffer: &mut String,
                                place: &Place,
