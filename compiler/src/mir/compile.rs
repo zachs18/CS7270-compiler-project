@@ -599,6 +599,8 @@ fn emit_function(
                 let rhs_dst = TEMP_REGS[1];
                 emit_load_local_or_constant(buffer, lhs, lhs_dst)?;
                 emit_load_local_or_constant(buffer, rhs, rhs_dst)?;
+                let next_emitted_block =
+                    basic_block_order.get(idx + 1).copied();
                 let signed = match *lhs {
                     LocalOrConstant::Local(slot) => {
                         match compilation_unit.types[body.slots[slot.0].0] {
@@ -612,55 +614,117 @@ fn emit_function(
                     }) => signed,
                     _ => unreachable!("non-integer in SwitchCmp"),
                 };
-                eprintln!("TODO: emit better code for SwitchCmp");
-                #[cfg(any())]
-                match (
-                    less_dst == greater_dst,
-                    less_dst == equal_dst,
-                    equal_dst == greater_dst,
-                ) {
-                    (true, true, true) => todo!(),
-                    // == or !=
-                    (true, false, false) => {
-                        todo!()
-                    }
-                    // <= or >
-                    (false, true, false) => todo!(),
-                    // < or >=
-                    (false, false, true) => todo!(),
-                    // three-way cmp
-                    (false, false, false) => todo!(),
-                    (true, true, false)
-                    | (false, true, true)
-                    | (true, false, true) => {
-                        unreachable!("transitivity of equality")
-                    }
+
+                macro_rules! emit_switch_cmp {
+                    ($([$($predicates:expr),* $(,)?] => { $($format:tt $(,$operands:expr)* ;)* } $(,)?)*) => {
+                        $(
+                            if true $(&& $predicates)* {
+                                $(
+                                    writeln!(buffer, $format, $($operands),*)?;
+                                )*
+                            } else
+                        )* {
+                            unreachable!("un-handled switchCmp result");
+                        }
+                    };
                 }
 
-                if signed {
-                    writeln!(
-                        buffer,
-                        "blt {lhs_dst}, {rhs_dst}, {}",
-                        basic_block_label!(less_dst)
-                    )?;
-                    writeln!(
-                        buffer,
-                        "bgt {lhs_dst}, {rhs_dst}, {}",
-                        basic_block_label!(greater_dst)
-                    )?;
-                    writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
-                } else {
-                    writeln!(
-                        buffer,
-                        "bltu {lhs_dst}, {rhs_dst}, {}",
-                        basic_block_label!(less_dst)
-                    )?;
-                    writeln!(
-                        buffer,
-                        "bgtu {lhs_dst}, {rhs_dst}, {}",
-                        basic_block_label!(greater_dst)
-                    )?;
-                    writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
+                let (less_dst, greater_dst, lhs_dst, rhs_dst) =
+                    if greater_dst != equal_dst {
+                        (less_dst, greater_dst, lhs_dst, rhs_dst)
+                    } else {
+                        // Swap >= to <= so that we only have to handle <=
+                        (greater_dst, less_dst, rhs_dst, lhs_dst)
+                    };
+
+                emit_switch_cmp! {
+                    // redundant comparison, no jump needed
+                    [less_dst == equal_dst, equal_dst == greater_dst, Some(less_dst) == next_emitted_block] => {},
+                    // redundant comparison, jump needed
+                    [less_dst == equal_dst, equal_dst == greater_dst] => {
+                        "j {}", basic_block_label!(less_dst);
+                    },
+                    // == or !=, equal is the jump
+                    [less_dst == greater_dst, Some(less_dst) == next_emitted_block] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                    }
+                    // == or !=, not-equal is the jump
+                    [less_dst == greater_dst, Some(equal_dst) == next_emitted_block] => {
+                        "bne {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                    }
+                    // == or !=, both are jumps
+                    [less_dst == greater_dst] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "j {}", basic_block_label!(less_dst);
+                    }
+                    // signed <= or >, less-equal is the jump
+                    [signed, less_dst == equal_dst, Some(greater_dst) == next_emitted_block] => {
+                        "ble {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                    }
+                    // unsigned <= or >, less-equal is the jump
+                    [!signed, less_dst == equal_dst, Some(greater_dst) == next_emitted_block] => {
+                        "bleu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                    }
+                    // signed <= or >, greater is the jump
+                    [signed, less_dst == equal_dst, Some(less_dst) == next_emitted_block] => {
+                        "bgt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // unsigned <= or >, greater is the jump
+                    [!signed, less_dst == equal_dst, Some(less_dst) == next_emitted_block] => {
+                        "bgtu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // signed <= or >, both are jumps
+                    [signed, less_dst == equal_dst] => {
+                        "ble {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "j {}", basic_block_label!(greater_dst);
+                    }
+                    // unsigned <= or >, both are jumps
+                    [!signed, less_dst == equal_dst] => {
+                        "bleu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "j {}", basic_block_label!(greater_dst);
+                    }
+                    // signed three-way comparison, less is next
+                    [signed, Some(less_dst) == next_emitted_block] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "bgt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // signed three-way comparison, equal is next
+                    [signed, Some(equal_dst) == next_emitted_block] => {
+                        "blt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "bgt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // signed three-way comparison, greater is next
+                    [signed, Some(greater_dst) == next_emitted_block] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "blt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                    }
+                    // signed three-way comparison, all are jumps
+                    [signed] => {
+                        "blt {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "j {}", basic_block_label!(greater_dst);
+                    }
+                    // unsigned three-way comparison, less is next
+                    [!signed, Some(less_dst) == next_emitted_block] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "bgtu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // unsigned three-way comparison, equal is next
+                    [!signed, Some(equal_dst) == next_emitted_block] => {
+                        "bltu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "bgtu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(greater_dst);
+                    }
+                    // unsigned three-way comparison, greater is next
+                    [!signed, Some(greater_dst) == next_emitted_block] => {
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "bltu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                    }
+                    // unsigned three-way comparison, all are jumps
+                    [!signed] => {
+                        "bltu {lhs_dst}, {rhs_dst}, {}", basic_block_label!(less_dst);
+                        "beq {lhs_dst}, {rhs_dst}, {}", basic_block_label!(equal_dst);
+                        "j {}", basic_block_label!(greater_dst);
+                    }
                 }
             }
             Terminator::Unreachable => writeln!(buffer, "unimp")?,
