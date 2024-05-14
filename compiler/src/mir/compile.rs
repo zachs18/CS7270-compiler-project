@@ -144,7 +144,8 @@ fn arithmetic_op_instruction(op: &ArithmeticOp, signed: bool) -> &str {
 fn emit_function(
     buffer: &mut String, compilation_unit: &CompilationUnit,
     state: &CompilationState, body: &super::Body, global: bool, name: &str,
-    new_local_symbol: &mut (impl ?Sized + FnMut() -> String),
+    new_local_symbol: &mut (impl ?Sized
+              + FnMut(Option<&dyn std::fmt::Display>) -> String),
     globals: &HashMap<hir::Symbol, (ItemIdx, TypeIdx)>,
     global_symbols: &[Cow<'_, str>],
 ) -> fmt::Result {
@@ -510,11 +511,12 @@ fn emit_function(
 
     let mut basic_block_labels: HashMap<BasicBlockIdx, String> = HashMap::new();
     macro_rules! basic_block_label {
-        ($block_idx:expr) => {
-            basic_block_labels
-                .entry($block_idx)
-                .or_insert_with(&mut *new_local_symbol)
-        };
+        ($block_idx:expr) => {{
+            let block_idx = $block_idx;
+            basic_block_labels.entry(block_idx).or_insert_with(|| {
+                new_local_symbol(Some(&format_args!("bb{}", block_idx.0)))
+            })
+        }};
     }
     let mut emitted_basic_blocks: HashSet<BasicBlockIdx> = HashSet::new();
 
@@ -661,7 +663,7 @@ fn emit_function(
                     writeln!(buffer, "j {}", basic_block_label!(equal_dst))?;
                 }
             }
-            Terminator::Unreachable => todo!(),
+            Terminator::Unreachable => writeln!(buffer, "unimp")?,
             Terminator::Call {
                 ref func,
                 ref args,
@@ -829,10 +831,13 @@ impl CompilationUnit {
         let mut buffer = String::new();
 
         let mut local_idx = 0;
-        let mut new_local_symbol = || {
+        let mut new_local_symbol = |suffix: Option<&dyn std::fmt::Display>| {
             let idx = local_idx;
             local_idx += 1;
-            format!(".L{idx}")
+            match suffix {
+                None => format!(".L{idx}"),
+                Some(suffix) => format!(".L{idx}_{suffix}"),
+            }
         };
 
         let global_symbols: Vec<Cow<str>> =
@@ -851,7 +856,7 @@ impl CompilationUnit {
                         ItemKind::LocalStatic { .. }
                         | ItemKind::LocalFn { .. }
                         | ItemKind::StringLiteral { .. } => {
-                            new_local_symbol().into()
+                            new_local_symbol(Some(&"str")).into()
                         }
                     }
                 })
