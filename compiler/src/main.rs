@@ -15,7 +15,7 @@ mod util;
 
 fn usage() -> ExitCode {
     println!(
-        "USAGE: {} <infile.asm> <outfile.asm>",
+        "USAGE: {} <infile.src> <outfile.asm>",
         std::env::args().nth(1).as_deref().unwrap_or("riscv-asm")
     );
     ExitCode::FAILURE
